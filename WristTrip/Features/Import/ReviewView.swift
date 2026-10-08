@@ -5,8 +5,11 @@ import UIKit
 struct ReviewView: View {
     let initialImage: UIImage?
     let onSave: (Ticket) -> Void
+    let isDuplicate: (Ticket) -> Bool
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var didLoadInitialImage = false
+    @State private var showingEditor = false
 
     @State private var selectedItem: PhotosPickerItem?
     @State private var image: UIImage?
@@ -16,7 +19,6 @@ struct ReviewView: View {
     @State private var validationMessage: String?
     @State private var recognized: [String: String] = [:]
     @State private var visibleSeats: [OCRSeat] = []
-    @State private var selectedSeat: OCRSeat?
     @State private var recognizedDuration: Int?
 
     @State private var train = ""
@@ -30,12 +32,15 @@ struct ReviewView: View {
     @State private var seat = ""
     @State private var seatClass = ""
     @State private var fare = ""
+    @State private var orderNumber = ""
     @State private var waitingRoom = ""
     @State private var gate = ""
 
-    init(initialImage: UIImage? = nil, onSave: @escaping (Ticket) -> Void) {
+    init(initialImage: UIImage? = nil, onSave: @escaping (Ticket) -> Void,
+         isDuplicate: @escaping (Ticket) -> Bool) {
         self.initialImage = initialImage
         self.onSave = onSave
+        self.isDuplicate = isDuplicate
     }
 
     var body: some View {
@@ -49,10 +54,17 @@ struct ReviewView: View {
                             Label(recognitionError, systemImage: "exclamationmark.circle")
                                 .font(.subheadline).foregroundStyle(.orange)
                         }
-                        Text("请按原图核对。未识别的字段保持空白；日期和时间均按中国铁路当地时间填写。")
-                            .font(.subheadline).foregroundStyle(.secondary)
                         if !visibleSeats.isEmpty { seatPicker }
-                        fields
+                        Button { showingEditor = true } label: {
+                            TicketSummaryPanel(ticket: previewTicket)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("编辑识别出的车票信息")
+                        Button { showingEditor = true } label: {
+                            TicketOnsitePanel(ticket: previewTicket)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("编辑候车室和检票口")
                         if let validationMessage {
                             Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
                                 .font(.subheadline).foregroundStyle(.red)
@@ -71,10 +83,17 @@ struct ReviewView: View {
                 }
                 .padding(20)
             }
+            .background(TripPalette.page(for: colorScheme).ignoresSafeArea())
             .navigationTitle("截图识别")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+            }
+            .sheet(isPresented: $showingEditor) {
+                TicketEditorView(ticket: previewTicket, initialFields: reviewEditFields) { editedFields in
+                    applyEdited(editedFields)
+                    showingEditor = false
+                }
             }
         }
         .onChange(of: selectedItem) { _, item in recognize(item) }
@@ -115,68 +134,66 @@ struct ReviewView: View {
     private var seatPicker: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("截图中可见的座位").font(.headline)
-            Picker("选择座位", selection: $selectedSeat) {
-                Text("暂不选择").tag(Optional<OCRSeat>.none)
+            Picker("选择座位", selection: Binding(
+                get: { visibleSeats.first { $0.carriage == carriage && $0.seat == seat && $0.seatClass == seatClass } },
+                set: { option in selectSeat(option) }
+            )) {
+                Text(carriage.isEmpty && seat.isEmpty ? "暂不选择" : "手动修改")
+                    .tag(Optional<OCRSeat>.none)
                 ForEach(visibleSeats, id: \.self) { option in
                     Text([option.carriage, option.seat, option.seatClass].filter { !$0.isEmpty }.joined(separator: " · ")).tag(Optional(option))
                 }
             }
             .pickerStyle(.menu)
-            .onChange(of: selectedSeat) { _, option in
-                carriage = option?.carriage ?? ""
-                seat = option?.seat ?? ""
-                seatClass = option?.seatClass ?? ""
-                if let option {
-                    recognized["carriage"] = option.carriage
-                    recognized["seat"] = option.seat
-                    if !option.seatClass.isEmpty { recognized["seatClass"] = option.seatClass }
-                } else {
-                    recognized.removeValue(forKey: "carriage")
-                    recognized.removeValue(forKey: "seat")
-                    recognized.removeValue(forKey: "seatClass")
-                }
-            }
             Text("仅列出图片中可见且能对应的座位；其他乘客请展开后重新分享。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
 
-    private var fields: some View {
-        VStack(spacing: 0) {
-            row("车次", text: $train, prompt: "如 G1234"); Divider()
-            row("出行日期", text: $travelDate, prompt: "YYYY-MM-DD"); Divider()
-            row("计划发车", text: $departure, prompt: "HH:mm"); Divider()
-            row("到站日期", text: $arrivalDate, prompt: "YYYY-MM-DD"); Divider()
-            row("计划到站", text: $arrival, prompt: "HH:mm"); Divider()
-            row("出发站", text: $from, prompt: "站名"); Divider()
-            row("到达站", text: $to, prompt: "站名"); Divider()
-            row("车厢", text: $carriage, prompt: "待补充"); Divider()
-            row("座位", text: $seat, prompt: "待补充"); Divider()
-            row("席别", text: $seatClass, prompt: "如 二等座"); Divider()
-            row("票价", text: $fare, prompt: "如 ¥25"); Divider()
-            row("候车室", text: $waitingRoom, prompt: "待公布"); Divider()
-            row("检票口", text: $gate, prompt: "待公布")
+    private func selectSeat(_ option: OCRSeat?) {
+        carriage = option?.carriage ?? ""
+        seat = option?.seat ?? ""
+        seatClass = option?.seatClass ?? ""
+        if let option {
+            recognized["carriage"] = option.carriage
+            recognized["seat"] = option.seat
+            if !option.seatClass.isEmpty { recognized["seatClass"] = option.seatClass }
+        } else {
+            recognized.removeValue(forKey: "carriage")
+            recognized.removeValue(forKey: "seat")
+            recognized.removeValue(forKey: "seatClass")
         }
-        .padding(.horizontal, 14)
-        .background(.background, in: RoundedRectangle(cornerRadius: 6))
     }
 
-    private func row(_ label: String, text: Binding<String>, prompt: String) -> some View {
-        HStack(spacing: 10) {
-            Text(label).foregroundStyle(.secondary).frame(width: 76, alignment: .leading)
-            TextField(prompt, text: text).multilineTextAlignment(.trailing)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .accessibilityLabel(label)
-        }
-        .font(.subheadline)
-        .padding(.vertical, 13)
+    private var previewTicket: Ticket { makeTicket(draft: true) }
+
+    private var reviewEditFields: TicketEditFields {
+        var fields = TicketEditFields(ticket: previewTicket)
+        fields.arrivalDate = arrivalDate
+        return fields
+    }
+
+    private func applyEdited(_ fields: TicketEditFields) {
+        train = fields.train
+        travelDate = fields.travelDate
+        departure = fields.departureTime
+        arrivalDate = fields.arrivalDate
+        arrival = fields.arrivalTime
+        from = fields.from
+        to = fields.to
+        carriage = fields.carriage
+        seat = fields.seat
+        seatClass = fields.seatClass
+        fare = fields.fare
+        orderNumber = fields.orderNumber
+        waitingRoom = fields.waitingRoom
+        gate = fields.gate
     }
 
     private func save(draft: Bool) {
         validationMessage = nil
         guard image != nil else { validationMessage = "请先选择车票图片"; return }
-        let values = [train, travelDate, departure, arrivalDate, arrival, from, to, carriage, seat, seatClass, fare, waitingRoom, gate]
+        let values = [train, travelDate, departure, arrivalDate, arrival, from, to, carriage, seat, seatClass, fare, orderNumber, waitingRoom, gate]
         if draft {
             guard values.contains(where: { !trimmed($0).isEmpty }) else {
                 validationMessage = "至少填写一项车票信息后再保存草稿"
@@ -200,7 +217,12 @@ struct ReviewView: View {
                 return
             }
         }
-        onSave(makeTicket(draft: draft))
+        let ticket = makeTicket(draft: draft)
+        if !draft && isDuplicate(ticket) {
+            validationMessage = "这张车票已添加，请在行程中查看或编辑"
+            return
+        }
+        onSave(ticket)
     }
 
     private func makeTicket(draft: Bool) -> Ticket {
@@ -211,6 +233,7 @@ struct ReviewView: View {
         let values = ["train": train, "travelDate": travelDate, "departureTime": departure,
                       "arrivalDate": arrivalDate, "arrivalTime": arrival, "from": from, "to": to,
                       "carriage": carriage, "seat": seat, "seatClass": seatClass, "fare": fare,
+                      "orderNumber": orderNumber,
                       "waitingRoom": waitingRoom, "gate": gate]
         let sources = values.reduce(into: [String: TicketFieldSource]()) { result, entry in
             guard !trimmed(entry.value).isEmpty else { return }
@@ -224,7 +247,8 @@ struct ReviewView: View {
                             status: .upcoming, syncText: draft ? "草稿 · 尚未同步" : "尚未同步",
                             sourceText: "来自导入截图与人工核对", plannedDepartureAt: departureAt,
                       plannedArrivalAt: arrivalAt, durationMinutes: duration ?? recognizedDuration,
-                      fieldSources: sources, seatClass: trimmed(seatClass), fare: trimmed(fare))
+                      fieldSources: sources, seatClass: trimmed(seatClass), fare: trimmed(fare),
+                      orderNumber: trimmed(orderNumber))
         ticket.refreshStatus()
         return ticket
     }
@@ -281,10 +305,9 @@ struct ReviewView: View {
         validationMessage = nil
         recognized = [:]
         visibleSeats = []
-        selectedSeat = nil
         recognizedDuration = nil
         train = ""; travelDate = ""; departure = ""; arrivalDate = ""; arrival = ""
-        from = ""; to = ""; carriage = ""; seat = ""; seatClass = ""; fare = ""; waitingRoom = ""; gate = ""
+        from = ""; to = ""; carriage = ""; seat = ""; seatClass = ""; fare = ""; orderNumber = ""; waitingRoom = ""; gate = ""
     }
 
     private func apply(_ fields: OCRTicketFields) {
@@ -296,10 +319,10 @@ struct ReviewView: View {
         from = fields.from ?? ""
         to = fields.to ?? ""
         fare = fields.fare ?? ""
+        orderNumber = fields.orderNumber ?? ""
         waitingRoom = fields.waitingRoom ?? ""
         gate = fields.gate ?? ""
         visibleSeats = fields.seats
-        selectedSeat = fields.seats.first
         if let firstSeat = fields.seats.first {
             carriage = firstSeat.carriage
             seat = firstSeat.seat
@@ -309,7 +332,8 @@ struct ReviewView: View {
         recognized = ["train": train, "travelDate": travelDate, "departureTime": departure,
                       "arrivalDate": arrivalDate, "arrivalTime": arrival, "from": from, "to": to,
                       "carriage": carriage, "seat": seat, "seatClass": seatClass,
-                      "waitingRoom": waitingRoom, "gate": gate, "fare": fare]
+                      "waitingRoom": waitingRoom, "gate": gate, "fare": fare,
+                      "orderNumber": orderNumber]
             .filter { !$0.value.isEmpty }
     }
 }

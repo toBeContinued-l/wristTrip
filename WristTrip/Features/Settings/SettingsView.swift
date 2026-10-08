@@ -1,15 +1,51 @@
 import SwiftUI
 
+enum AppearanceMode: String, CaseIterable, Identifiable {
+    case system
+    case light
+    case dark
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .system: return "跟随系统"
+        case .light: return "浅色"
+        case .dark: return "深色"
+        }
+    }
+
+    var colorScheme: ColorScheme? {
+        switch self {
+        case .system: return nil
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
 struct SettingsView: View {
     @Binding var showingWatch: Bool
     @Binding var toast: String?
     @Binding var liveActivitiesEnabled: Bool
+    @Binding var appearanceModeRaw: String
     var onDeleteAll: () -> Void = {}
     var onLiveActivitiesChanged: (Bool) -> Void = { _ in }
     @State private var showingDeleteConfirmation = false
 
     var body: some View {
         Form {
+            Section {
+                Picker("外观", selection: $appearanceModeRaw) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+            } header: {
+                Text("外观")
+            }
+
             Section {
                 Button { showingWatch = true } label: {
                     Label("查看智能叠放预览", systemImage: "applewatch")

@@ -64,7 +64,11 @@ private struct TripActivityCard: View {
                 Text(context.attributes.destination).lineLimit(1)
             }
             .font(.subheadline)
-            Text("计划 \(departureText)").font(.caption).lineLimit(1)
+            if let demoExpiresAt = context.attributes.demoExpiresAt {
+                Text("演示至 \(demoExpiresAt, style: .time)").font(.caption).lineLimit(1)
+            } else {
+                Text("计划 \(departureText)").font(.caption).lineLimit(1)
+            }
             if !context.attributes.fare.isEmpty {
                 Text("票价 \(context.attributes.fare)").font(.caption2).lineLimit(1)
             }

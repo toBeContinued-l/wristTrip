@@ -17,4 +17,5 @@ struct TripActivityAttributes: ActivityAttributes {
     let seat: String
     let seatClass: String
     let fare: String
+    let demoExpiresAt: Date?
 }

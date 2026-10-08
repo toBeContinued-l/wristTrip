@@ -11,11 +11,33 @@ enum TripActivityResult {
     case arrived
     case timeLimitReached
     case disabled
+    case demoActive
 }
 
 /// Call from the iPhone app after ticket edits and when it becomes active.
 /// Future starts and guaranteed scheduled transitions require a push service.
 struct TripActivityService {
+    static func startDemo(ticket: Ticket, now: Date = Date()) async throws -> TripActivityResult {
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return .disabled }
+        await endAll()
+        let expiresAt = now.addingTimeInterval(15 * 60)
+        let attributes = TripActivityAttributes(
+            ticketID: ticket.id, train: ticket.train.isEmpty ? "演示车次" : ticket.train,
+            origin: ticket.from.isEmpty ? "出发站" : ticket.from,
+            destination: ticket.to.isEmpty ? "到达站" : ticket.to,
+            departureAt: now, arrivalAt: expiresAt,
+            timezoneIdentifier: ticket.originalTimezoneIdentifier,
+            carriage: ticket.carriage, seat: ticket.seat, seatClass: ticket.seatClass,
+            fare: ticket.fare, demoExpiresAt: expiresAt
+        )
+        let content = ActivityContent(
+            state: TripActivityAttributes.ContentState(plannedStatus: "演示"),
+            staleDate: expiresAt
+        )
+        _ = try Activity.request(attributes: attributes, content: content, pushType: nil)
+        return .demoActive
+    }
+
     static func endAll() async {
         for activity in Activity<TripActivityAttributes>.activities {
             await activity.end(nil, dismissalPolicy: .immediate)
@@ -24,6 +46,12 @@ struct TripActivityService {
 
     static func refresh(tickets: [Ticket], selectedTicketID: UUID?, requestedTicketID: UUID? = nil, now: Date = Date()) async throws -> TripActivityResult {
         let activities = Activity<TripActivityAttributes>.activities
+        if let demo = activities.first(where: { ($0.attributes.demoExpiresAt ?? .distantPast) > now }) {
+            for activity in activities where activity.id != demo.id {
+                await activity.end(nil, dismissalPolicy: .immediate)
+            }
+            return .demoActive
+        }
         let eligible = tickets.filter { ticket in
             guard !ticket.isDraft, let departure = ticket.plannedDepartureAt,
                   let arrival = ticket.plannedArrivalAt else { return false }
@@ -69,7 +97,7 @@ struct TripActivityService {
             destination: selected.to, departureAt: departure, arrivalAt: arrival,
             timezoneIdentifier: selected.originalTimezoneIdentifier,
             carriage: selected.carriage, seat: selected.seat, seatClass: selected.seatClass,
-            fare: selected.fare
+            fare: selected.fare, demoExpiresAt: nil
         )
         _ = try Activity.request(attributes: attributes, content: content, pushType: nil)
         return .started(selected.id)
@@ -78,7 +106,7 @@ struct TripActivityService {
 
 private extension TripActivityAttributes {
     func matches(_ ticket: Ticket) -> Bool {
-        ticketID == ticket.id && train == ticket.train && origin == ticket.from
+        demoExpiresAt == nil && ticketID == ticket.id && train == ticket.train && origin == ticket.from
             && destination == ticket.to && departureAt == ticket.plannedDepartureAt
             && arrivalAt == ticket.plannedArrivalAt
             && timezoneIdentifier == ticket.originalTimezoneIdentifier

@@ -1,5 +1,17 @@
 import SwiftUI
 
+enum TripPalette {
+    static func page(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(red: 0.075, green: 0.08, blue: 0.085)
+            : Color(uiColor: .systemGroupedBackground)
+    }
+
+    static func card(for scheme: ColorScheme) -> Color {
+        scheme == .dark ? Color(red: 0.16, green: 0.17, blue: 0.18)
+            : Color(uiColor: .secondarySystemGroupedBackground)
+    }
+}
+
 private struct TicketCardContent: View {
     let ticket: Ticket
 
@@ -70,6 +82,7 @@ private struct TicketCardContent: View {
 }
 
 struct CurrentTicketCard: View {
+    @Environment(\.colorScheme) private var colorScheme
     let ticket: Ticket
     let onSync: () -> Void
     let onWatch: () -> Void
@@ -91,16 +104,17 @@ struct CurrentTicketCard: View {
             Text(ticket.syncText).font(.caption2).foregroundStyle(.secondary)
         }
         .padding(15)
-        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .background(TripPalette.card(for: colorScheme), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
 struct TicketRow: View {
+    @Environment(\.colorScheme) private var colorScheme
     let ticket: Ticket
     var body: some View {
         TicketCardContent(ticket: ticket)
             .padding(15)
-            .background(.background, in: RoundedRectangle(cornerRadius: 8))
+            .background(TripPalette.card(for: colorScheme), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -115,48 +129,67 @@ struct StatusBadge: View {
 }
 
 struct TicketDetailView: View {
+    @Environment(\.colorScheme) private var colorScheme
     let ticket: Ticket
+    @Binding var demoFeedback: String?
     let onSync: () -> Void
+    let onDemo: () -> Void
     let onDelete: () -> Void
     let onUpdate: (Ticket) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingDelete = false
     @State private var showingEditor = false
     @State private var editingField: TicketEditField?
+    @State private var showingProvenance = true
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                TicketCardContent(ticket: ticket)
-                    .padding(16)
-                    .background(.background, in: RoundedRectangle(cornerRadius: 8))
-                fieldSection("车票信息", fields: [
-                    ("车次", ticket.train, "train"),
-                    ("出行日期", ticket.date, "travelDate"),
-                    ("计划发车", ticket.departTime, "departureTime"),
-                    ("到站日期", arrivalDay, "arrivalDate"),
-                    ("计划到站", ticket.arriveTime, "arrivalTime"),
-                    ("出发站", ticket.from, "from"), ("到达站", ticket.to, "to"),
-                    ("车厢", ticket.carriage, "carriage"), ("座位", ticket.seat, "seat"),
-                    ("席别", ticket.seatClass, "seatClass"), ("票价", ticket.fare, "fare")
-                ])
-                fieldSection("现场信息", fields: [
-                    ("候车室", ticket.waitingRoom, "waitingRoom"),
-                    ("检票口", ticket.gate, "gate")
-                ])
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(ticket.sourceText)
-                    Text("导入于 \(ticket.importedAt.formatted(date: .abbreviated, time: .shortened))")
-                    Text("更新于 \(ticket.updatedAt.formatted(date: .abbreviated, time: .shortened))")
-                    Text("状态依据计划时间推算")
+            VStack(alignment: .leading, spacing: 12) {
+                Button { editingField = nil; showingEditor = true } label: {
+                    TicketSummaryPanel(ticket: ticket)
                 }
-                .font(.caption).foregroundStyle(.secondary)
-                Button(action: onSync) { Label("显示到智能叠放", systemImage: "applewatch.and.arrow.forward") }
-                    .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .accessibilityLabel("编辑车票信息")
+                Button { editingField = .waitingRoom; showingEditor = true } label: {
+                    TicketOnsitePanel(ticket: ticket)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("编辑候车室和检票口")
+                DisclosureGroup("来源与时间", isExpanded: $showingProvenance) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(ticket.sourceText)
+                        Text("导入于 \(ticket.importedAt.formatted(date: .abbreviated, time: .shortened))")
+                        Text("更新于 \(ticket.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                        Text("状态依据计划时间推算")
+                    }
+                    .padding(.top, 5)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
             }
             .padding(16)
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            HStack(spacing: 10) {
+                Button(action: onSync) {
+                    Label("显示到智能叠放", systemImage: "applewatch.and.arrow.forward")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                Button(action: onDemo) {
+                    Image(systemName: "play.rectangle")
+                        .frame(width: 38, height: 28)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel("启动 15 分钟智能叠放演示")
+                .help("启动 15 分钟智能叠放演示")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.bar)
+        }
+        .background(TripPalette.page(for: colorScheme).ignoresSafeArea())
         .navigationTitle("车票详情")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -173,9 +206,77 @@ struct TicketDetailView: View {
                 showingEditor = false
             }
         }
-        .confirmationDialog("删除这张车票？", isPresented: $confirmingDelete) {
-            Button("删除车票", role: .destructive) { onDelete(); dismiss() }
+        .alert("确认删除这张车票？", isPresented: $confirmingDelete) {
+            Button("取消", role: .cancel) {}
+            Button("确认删除", role: .destructive) { onDelete(); dismiss() }
+        } message: {
+            Text("此操作将删除本机保存的这张车票，且无法恢复。")
         }
+        .alert("智能叠放演示", isPresented: Binding(
+            get: { demoFeedback != nil },
+            set: { if !$0 { demoFeedback = nil } }
+        )) {
+            Button("知道了") { demoFeedback = nil }
+        } message: {
+            Text(demoFeedback ?? "")
+        }
+    }
+
+}
+
+struct TicketSummaryPanel: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let ticket: Ticket
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(display(ticket.train)).font(.title2.bold())
+                Spacer()
+                StatusBadge(status: ticket.status)
+            }
+            HStack(spacing: 10) {
+                Text(display(ticket.from)).frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "arrow.right").font(.subheadline).foregroundStyle(.secondary)
+                Text(display(ticket.to)).frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .font(.title3.weight(.semibold))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            scheduleRow("出发", date: ticket.plannedDepartureAt, fallbackDay: ticket.date, time: ticket.departTime)
+            scheduleRow("到达", date: ticket.plannedArrivalAt, fallbackDay: arrivalDay, time: ticket.arriveTime)
+            HStack(spacing: 6) {
+                Text(display(ticket.seatClass))
+                Text("·").foregroundStyle(.tertiary)
+                Text(display(ticket.carriage))
+                Text("·").foregroundStyle(.tertiary)
+                Text(display(ticket.seat))
+                Spacer(minLength: 0)
+            }
+            .font(.subheadline.weight(.medium))
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            Divider()
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("订单号").font(.caption2).foregroundStyle(.secondary)
+                    Text(ticket.orderNumber.isEmpty ? "待补充" : ticket.orderNumber)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(ticket.orderNumber.isEmpty ? .secondary : .primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 4)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("票价").font(.caption2).foregroundStyle(.secondary)
+                    Text(display(ticket.fare)).font(.subheadline.weight(.semibold))
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(TripPalette.card(for: colorScheme), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var arrivalDay: String {
@@ -186,82 +287,147 @@ struct TicketDetailView: View {
         return formatter.string(from: arrival)
     }
 
-    private func fieldSection(_ title: String, fields: [(String, String, String)]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.headline)
-            ForEach(fields, id: \.0) { field in
-                Button {
-                    editingField = TicketEditField(rawValue: field.2)
-                    showingEditor = true
-                } label: {
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(field.0).foregroundStyle(.secondary)
-                        Spacer(minLength: 4)
-                        VStack(alignment: .trailing, spacing: 2) {
-                            Text(field.1.isEmpty ? "待补充" : field.1).multilineTextAlignment(.trailing)
-                            if let source = ticket.fieldSources[field.2] {
-                                Text(source.rawValue).font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }
-                        Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.tertiary)
-                    }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("编辑\(field.0)，当前\(field.1.isEmpty ? "待补充" : field.1)")
-                if field.0 != fields.last?.0 { Divider() }
-            }
+    private func scheduleRow(_ label: String, date: Date?, fallbackDay: String, time: String) -> some View {
+        HStack(spacing: 10) {
+            Text(label).foregroundStyle(.secondary).frame(width: 32, alignment: .leading)
+            Text(date.map { formatted($0) } ?? display(fallbackDay))
+            Text(display(time, fallback: "--:--")).monospacedDigit()
+            Spacer(minLength: 0)
         }
         .font(.subheadline)
-        .padding(16)
-        .background(.background, in: RoundedRectangle(cornerRadius: 8))
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
+    }
+
+    private func formatted(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = ticket.displayTimezone
+        formatter.dateFormat = "yyyy年M月d日"
+        return formatter.string(from: date)
+    }
+
+    private func display(_ value: String, fallback: String = "待补充") -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
     }
 }
 
-enum TicketEditField: String, Hashable {
+struct TicketOnsitePanel: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let ticket: Ticket
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            onsiteValue("候车室", ticket.waitingRoom)
+            Divider()
+            onsiteValue("检票口", ticket.gate)
+        }
+        .frame(height: 40)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(TripPalette.card(for: colorScheme), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func onsiteValue(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(display(value, fallback: "待公布"))
+                .font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func display(_ value: String, fallback: String = "待补充") -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
+    }
+}
+
+enum TicketEditField: String, Hashable, Identifiable {
     case train, travelDate, departureTime, arrivalDate, arrivalTime, from, to
-    case carriage, seat, seatClass, fare, waitingRoom, gate
+    case carriage, seat, seatClass, fare, orderNumber, waitingRoom, gate
+    var id: String { rawValue }
 }
 
 struct TicketEditorView: View {
+    @Environment(\.colorScheme) private var colorScheme
     let ticket: Ticket
     let initialFocus: TicketEditField?
-    let onSave: (Ticket) -> Void
+    let onSave: ((Ticket) -> Void)?
+    let onSaveFields: ((TicketEditFields) -> Void)?
     @Environment(\.dismiss) private var dismiss
     @State private var fields: TicketEditFields
     @State private var validationMessage: String?
     @FocusState private var focusedField: TicketEditField?
+    @State private var pickerField: TicketEditField?
+    @State private var pickerValue = Date()
 
-    init(ticket: Ticket, initialFocus: TicketEditField? = nil, onSave: @escaping (Ticket) -> Void) {
+    init(ticket: Ticket, initialFocus: TicketEditField? = nil,
+         initialFields: TicketEditFields? = nil, onSave: @escaping (Ticket) -> Void) {
         self.ticket = ticket
         self.initialFocus = initialFocus
         self.onSave = onSave
-        _fields = State(initialValue: TicketEditFields(ticket: ticket))
+        self.onSaveFields = nil
+        _fields = State(initialValue: initialFields ?? TicketEditFields(ticket: ticket))
+    }
+
+    init(ticket: Ticket, initialFields: TicketEditFields,
+         onSaveFields: @escaping (TicketEditFields) -> Void) {
+        self.ticket = ticket
+        self.initialFocus = nil
+        self.onSave = nil
+        self.onSaveFields = onSaveFields
+        _fields = State(initialValue: initialFields)
     }
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("行程") {
-                    row("车次", $fields.train, "如 G1234", .train)
-                    row("出行日期", $fields.travelDate, "YYYY-MM-DD", .travelDate)
-                    row("计划发车", $fields.departureTime, "HH:mm", .departureTime)
-                    row("到站日期", $fields.arrivalDate, "YYYY-MM-DD", .arrivalDate)
-                    row("计划到站", $fields.arrivalTime, "HH:mm", .arrivalTime)
-                    row("出发站", $fields.from, "站名", .from)
-                    row("到达站", $fields.to, "站名", .to)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 11) {
+                        textInput("车次", $fields.train, "如 G1234", .train, font: .title2.bold())
+                        HStack(spacing: 10) {
+                            textInput("出发站", $fields.from, "出发站", .from, font: .title3.weight(.semibold))
+                            Image(systemName: "arrow.right").foregroundStyle(.secondary)
+                            textInput("到达站", $fields.to, "到达站", .to, font: .title3.weight(.semibold))
+                                .multilineTextAlignment(.trailing)
+                        }
+                        scheduleInput("出发", day: fields.travelDate, time: fields.departureTime,
+                                      dayField: .travelDate, timeField: .departureTime)
+                        scheduleInput("到达", day: fields.arrivalDate, time: fields.arrivalTime,
+                                      dayField: .arrivalDate, timeField: .arrivalTime)
+                        HStack(spacing: 6) {
+                            textInput("席别", $fields.seatClass, "席别", .seatClass)
+                            Text("·").foregroundStyle(.tertiary)
+                            textInput("车厢", $fields.carriage, "车厢", .carriage)
+                            Text("·").foregroundStyle(.tertiary)
+                            textInput("座位", $fields.seat, "座位", .seat)
+                        }
+                        Divider()
+                        HStack(alignment: .firstTextBaseline, spacing: 12) {
+                            labeledInput("订单号", $fields.orderNumber, "待补充", .orderNumber)
+                            labeledInput("票价", $fields.fare, "待补充", .fare)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 90)
+                        }
+                    }
+                    .padding(16)
+                    .background(TripPalette.card(for: colorScheme), in: RoundedRectangle(cornerRadius: 8))
+                    HStack(spacing: 16) {
+                        labeledInput("候车室", $fields.waitingRoom, "待公布", .waitingRoom)
+                        Divider()
+                        labeledInput("检票口", $fields.gate, "待公布", .gate)
+                    }
+                    .frame(height: 40)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(TripPalette.card(for: colorScheme), in: RoundedRectangle(cornerRadius: 8))
+                    if let validationMessage { Text(validationMessage).font(.subheadline).foregroundStyle(.red) }
                 }
-                Section("座位") {
-                    row("车厢", $fields.carriage, "待补充", .carriage)
-                    row("座位", $fields.seat, "待补充", .seat)
-                    row("席别", $fields.seatClass, "如 二等座", .seatClass)
-                    row("票价", $fields.fare, "如 ¥25", .fare)
-                }
-                Section("现场信息") {
-                    row("候车室", $fields.waitingRoom, "待公布", .waitingRoom)
-                    row("检票口", $fields.gate, "待公布", .gate)
-                }
-                if let validationMessage { Text(validationMessage).foregroundStyle(.red) }
+                .padding(16)
             }
+            .background(TripPalette.page(for: colorScheme).ignoresSafeArea())
             .navigationTitle("编辑车票")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -273,6 +439,28 @@ struct TicketEditorView: View {
                 try? await Task.sleep(for: .milliseconds(250))
                 applyInitialFocus()
             }
+            .sheet(item: $pickerField) { field in
+                NavigationStack {
+                    Group {
+                        if field == .travelDate || field == .arrivalDate {
+                            DatePicker("选择日期", selection: $pickerValue, displayedComponents: .date)
+                                .datePickerStyle(.graphical)
+                        } else {
+                            DatePicker("选择时间", selection: $pickerValue, displayedComponents: .hourAndMinute)
+                                .datePickerStyle(.wheel)
+                        }
+                    }
+                    .padding()
+                    .environment(\.timeZone, ticket.displayTimezone)
+                    .navigationTitle(field == .travelDate || field == .arrivalDate ? "选择日期" : "选择时间")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) { Button("取消") { pickerField = nil } }
+                        ToolbarItem(placement: .confirmationAction) { Button("完成") { applyPicker(field) } }
+                    }
+                }
+                .presentationDetents([.medium])
+            }
         }
     }
 
@@ -281,19 +469,76 @@ struct TicketEditorView: View {
         focusedField = initialFocus
     }
 
-    private func row(_ label: String, _ text: Binding<String>, _ prompt: String, _ field: TicketEditField) -> some View {
-        HStack(spacing: 8) {
-            Text(label).frame(width: 76, alignment: .leading)
-            TextField(prompt, text: text).multilineTextAlignment(.trailing)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                .focused($focusedField, equals: field)
-                .accessibilityLabel(label)
+    private func textInput(_ label: String, _ text: Binding<String>, _ prompt: String,
+                           _ field: TicketEditField, font: Font = .subheadline.weight(.medium)) -> some View {
+        TextField(prompt, text: text)
+            .font(font)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .focused($focusedField, equals: field)
+            .accessibilityLabel(label)
+    }
+
+    private func labeledInput(_ label: String, _ text: Binding<String>, _ prompt: String,
+                              _ field: TicketEditField) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+            textInput(label, text, prompt, field, font: .subheadline)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func scheduleInput(_ label: String, day: String, time: String,
+                               dayField: TicketEditField, timeField: TicketEditField) -> some View {
+        HStack(spacing: 10) {
+            Text(label).foregroundStyle(.secondary).frame(width: 32, alignment: .leading)
+            Button(day.isEmpty ? "选择日期" : day) { openPicker(dayField, day: day, time: time) }
+            Button(time.isEmpty ? "选择时间" : time) { openPicker(timeField, day: day, time: time) }
+                .monospacedDigit()
+            Spacer(minLength: 0)
+        }
+        .font(.subheadline)
+        .buttonStyle(.plain)
+        .tint(.indigo)
+    }
+
+    private func openPicker(_ field: TicketEditField, day: String, time: String) {
+        focusedField = nil
+        let formatter = DateFormatter()
+        formatter.timeZone = ticket.displayTimezone
+        formatter.dateFormat = "yyyy-MM-dd"
+        let selectedDay = day.isEmpty ? formatter.string(from: Date()) : day
+        pickerValue = Ticket.scheduleDate(day: selectedDay, time: time.isEmpty ? "12:00" : time,
+                                          timezone: ticket.displayTimezone) ?? Date()
+        pickerField = field
+    }
+
+    private func applyPicker(_ field: TicketEditField) {
+        let formatter = DateFormatter()
+        formatter.timeZone = ticket.displayTimezone
+        switch field {
+        case .travelDate, .arrivalDate: formatter.dateFormat = "yyyy-MM-dd"
+        case .departureTime, .arrivalTime: formatter.dateFormat = "HH:mm"
+        default: return
+        }
+        let value = formatter.string(from: pickerValue)
+        switch field {
+        case .travelDate: fields.travelDate = value
+        case .arrivalDate: fields.arrivalDate = value
+        case .departureTime: fields.departureTime = value
+        case .arrivalTime: fields.arrivalTime = value
+        default: break
+        }
+        pickerField = nil
     }
 
     private func save() {
+        if let onSaveFields {
+            onSaveFields(fields)
+            return
+        }
         switch fields.updatedTicket(from: ticket) {
-        case .success(let updated): onSave(updated)
+        case .success(let updated): onSave?(updated)
         case .failure(let error): validationMessage = error.localizedDescription
         }
     }
@@ -311,6 +556,7 @@ struct TicketEditFields {
     var seat: String
     var seatClass: String
     var fare: String
+    var orderNumber: String
     var waitingRoom: String
     var gate: String
 
@@ -326,6 +572,7 @@ struct TicketEditFields {
         seat = ticket.seat
         seatClass = ticket.seatClass
         fare = ticket.fare
+        orderNumber = ticket.orderNumber
         waitingRoom = ticket.waitingRoom == "待公布" ? "" : ticket.waitingRoom
         gate = ticket.gate == "待公布" ? "" : ticket.gate
     }
@@ -363,6 +610,7 @@ struct TicketEditFields {
         set("seat", original.seat, seat) { $0.seat = $1 }
         set("seatClass", original.seatClass, seatClass) { $0.seatClass = $1 }
         set("fare", original.fare, fare) { $0.fare = $1 }
+        set("orderNumber", original.orderNumber, orderNumber) { $0.orderNumber = $1 }
         set("waitingRoom", original.waitingRoom == "待公布" ? "" : original.waitingRoom, waitingRoom) {
             $0.waitingRoom = $1.isEmpty ? "待公布" : $1
         }

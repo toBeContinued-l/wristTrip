@@ -36,6 +36,7 @@ struct Ticket: Identifiable, Codable {
     var seat: String
     var seatClass: String
     var fare: String
+    var orderNumber: String
     var waitingRoom: String
     /// Original gate text as shown on the imported ticket.
     var gate: String
@@ -59,7 +60,7 @@ struct Ticket: Identifiable, Codable {
     var fieldSources: [String: TicketFieldSource]
 
     private enum CodingKeys: String, CodingKey {
-        case id, train, date, departTime, arriveTime, from, to, carriage, seat, seatClass, fare, waitingRoom, gate
+        case id, train, date, departTime, arriveTime, from, to, carriage, seat, seatClass, fare, orderNumber, waitingRoom, gate
         case fromStationTelecode, gateQueriedAt, gateQueryRawResponse
         case status, syncText, sourceText, plannedDepartureAt, plannedArrivalAt
         case originalTimezoneIdentifier, durationMinutes, normalizedGates, importedAt, updatedAt, fieldSources
@@ -71,7 +72,7 @@ struct Ticket: Identifiable, Codable {
          plannedArrivalAt: Date? = nil, originalTimezoneIdentifier: String = "Asia/Shanghai", durationMinutes: Int? = nil,
          normalizedGates: [String]? = nil, importedAt: Date = Date(), updatedAt: Date = Date(),
          fieldSources: [String: TicketFieldSource] = [:], fromStationTelecode: String? = nil,
-         gateQueriedAt: Date? = nil, gateQueryRawResponse: String? = nil, seatClass: String = "", fare: String = "") {
+         gateQueriedAt: Date? = nil, gateQueryRawResponse: String? = nil, seatClass: String = "", fare: String = "", orderNumber: String = "") {
         self.id = id
         self.train = train
         self.date = date
@@ -83,6 +84,7 @@ struct Ticket: Identifiable, Codable {
         self.seat = seat
         self.seatClass = seatClass
         self.fare = fare
+        self.orderNumber = orderNumber
         self.waitingRoom = waitingRoom
         self.gate = gate
         self.fromStationTelecode = fromStationTelecode
@@ -115,6 +117,7 @@ struct Ticket: Identifiable, Codable {
         seat = try values.decode(String.self, forKey: .seat)
         seatClass = try values.decodeIfPresent(String.self, forKey: .seatClass) ?? ""
         fare = try values.decodeIfPresent(String.self, forKey: .fare) ?? ""
+        orderNumber = try values.decodeIfPresent(String.self, forKey: .orderNumber) ?? ""
         waitingRoom = try values.decode(String.self, forKey: .waitingRoom)
         gate = try values.decode(String.self, forKey: .gate)
         fromStationTelecode = try values.decodeIfPresent(String.self, forKey: .fromStationTelecode)

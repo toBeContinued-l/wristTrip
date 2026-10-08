@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 @preconcurrency import Vision
 
 struct OCRSeat: Hashable {
@@ -25,12 +27,14 @@ struct OCRTicketFields {
     var waitingRoom: String?
     var gate: String?
     var fare: String?
+    var orderNumber: String?
     var durationMinutes: Int?
     var seats: [OCRSeat] = []
 
     init(train: String? = nil, travelDate: String? = nil, departureTime: String? = nil,
          arrivalDate: String? = nil, arrivalTime: String? = nil, from: String? = nil,
          to: String? = nil, waitingRoom: String? = nil, gate: String? = nil, fare: String? = nil,
+         orderNumber: String? = nil,
          durationMinutes: Int? = nil, seats: [OCRSeat] = []) {
         self.train = train
         self.travelDate = travelDate
@@ -42,6 +46,7 @@ struct OCRTicketFields {
         self.waitingRoom = waitingRoom
         self.gate = gate
         self.fare = fare
+        self.orderNumber = orderNumber
         self.durationMinutes = durationMinutes
         self.seats = seats
     }
@@ -73,6 +78,7 @@ enum TicketOCRServiceError: LocalizedError {
 }
 
 struct TicketOCRService {
+#if canImport(UIKit)
     /// Backwards-compatible raw OCR entry point. The review flow uses recognizeLines(in:)
     /// so parsing can use the text's image coordinates.
     func recognizeText(in image: UIImage) async throws -> String {
@@ -112,9 +118,11 @@ struct TicketOCRService {
             }
         }
     }
+#endif
 
     func parse(_ lines: [OCRLine]) -> OCRTicketFields {
         var fields = OCRTicketFields()
+        fields.orderNumber = orderNumber(in: lines)
         guard let trainLine = lines.first(where: { match($0.text, #"\b[DGCKTZYS]\s?\d{1,4}\b"#) != nil }) else {
             return fields
         }
@@ -168,16 +176,29 @@ struct TicketOCRService {
             fields.arrivalTime = ordered[1].time
         }
 
+        // If Vision grouped the train number and clock row differently, the
+        // narrow train-card window above can miss one or both clocks. The
+        // station rule still has a reliable anchor in the two left/right
+        // clock values, so recover them from the ticket region before pairing.
+        let ticketTimeCandidates = ticketLines.flatMap { line in
+            matches(line.text, #"(?<!\d)(?:[01]?\d|2[0-3])[:：][0-5]\d(?!\d)"#)
+                .map { (time: $0.replacingOccurrences(of: "：", with: ":"), x: line.x, y: line.y) }
+        }
+        let stationTimes = timeCandidates.count == 2 ? timeCandidates : ticketTimeCandidates
+
         // 12306's compact order card puts each station close to its
         // corresponding time. There is no route arrow between the station
         // labels, so use the time row as the spatial anchor and pair the
         // left/right labels.
         if fields.from == nil || fields.to == nil {
-            if let pair = stationsBelowTimes(in: ticketLines, times: timeCandidates) {
+            // Use all recognized lines here. The passenger section boundary
+            // is only a heuristic and can otherwise discard the station row
+            // when Vision groups the card differently.
+            if let pair = stationsBelowTimes(in: lines, times: stationTimes) {
                 fields.from = fields.from ?? pair.0
                 fields.to = fields.to ?? pair.1
             } else {
-                let stationAnchor = timeCandidates.map(\.y).first ?? routeLine?.y ?? trainLine.y
+                let stationAnchor = stationTimes.map(\.y).first ?? routeLine?.y ?? trainLine.y
                 if let pair = spatialStations(in: ticketLines, near: stationAnchor) {
                     fields.from = fields.from ?? pair.0
                     fields.to = fields.to ?? pair.1
@@ -232,12 +253,50 @@ struct TicketOCRService {
         return parse(lines)
     }
 
+    private func orderNumber(in lines: [OCRLine]) -> String? {
+        let labelPattern = #"订单(?:编号|号码|号)"#
+        let labels = lines.filter { match(compactOrderText($0.text), labelPattern) != nil }
+        let inline = labels.flatMap { line -> [String] in
+            let text = compactOrderText(line.text)
+            guard let range = text.range(of: labelPattern, options: .regularExpression) else { return [] }
+            return orderTokens(in: String(text[range.upperBound...]))
+        }
+        if Set(inline).count == 1 { return inline.first }
+        guard inline.isEmpty else { return nil }
+
+        let nearby = labels.flatMap { label in
+            lines.filter { line in
+                guard abs(line.y - label.y) < 0.09,
+                      line.x >= label.x - 0.25, line.x <= 0.98 else { return false }
+                let text = compactOrderText(line.text)
+                return text != compactOrderText(label.text)
+                    && !containsAny(text, ["下单", "支付", "预订", "日期", "时间", "手机", "证件", "身份证"])
+                    && text.range(of: #"^(?:[A-Z0-9:：#-])+$"#, options: .regularExpression) != nil
+            }.flatMap { orderTokens(in: compactOrderText($0.text)) }
+        }
+        return Set(nearby).count == 1 ? nearby.first : nil
+    }
+
+    private func compactOrderText(_ text: String) -> String {
+        text.folding(options: .widthInsensitive, locale: Locale(identifier: "en_US_POSIX"))
+            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            .uppercased()
+    }
+
+    private func orderTokens(in text: String) -> [String] {
+        let pattern = #"(?<![A-Z0-9])[A-Z]?\d{9,16}(?![A-Z0-9])"#
+        return matches(text, pattern).filter { token in
+            // A bare phone number beside the label is more likely contact information.
+            token.range(of: #"^1[3-9]\d{9}$"#, options: .regularExpression) == nil
+        }
+    }
+
     private func labeledValue(_ text: String, label: String) -> String? {
         guard let range = text.range(of: label) else { return nil }
         let value = text[range.upperBound...].replacingOccurrences(of: #"^(?:\s|[:：])+"#, with: "", options: .regularExpression)
             .components(separatedBy: "如有变更").first?
             .components(separatedBy: "以现场").first?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "（(，,、")))
         guard let value, !value.isEmpty, !containsAny(value, ["待公布", "暂无"]) else { return nil }
         return value
     }
@@ -270,7 +329,8 @@ struct TicketOCRService {
         guard !value.isEmpty, value.count <= 12,
               !containsAny(value, ["时间", "日期", "酒店", "订单", "历时", "检票",
                                    "经停", "车次", "乘车", "候车", "票价", "站台",
-                                   "发车", "到站", "出发", "到达"]) else { return nil }
+                                   "发车", "到站", "出发", "到达", "车票", "有效",
+                                   "变更", "改签", "退票", "分享"]) else { return nil }
         return value
     }
 
@@ -289,25 +349,26 @@ struct TicketOCRService {
         guard times.count == 2 else { return nil }
         let orderedTimes = times.sorted { $0.x < $1.x }
         let stationCandidates = orderedTimes.map { time in
-            lines.compactMap { line -> (name: String, y: CGFloat)? in
+            lines.compactMap { line -> (name: String, y: CGFloat, distance: CGFloat)? in
                 // Vision's normalized Y axis grows upward, so the station
                 // shown below each time has a smaller Y value. Ignore labels
                 // above the time and choose only the nearby station row.
                 guard line.y < time.y,
                       time.y - line.y <= 0.24,
-                      abs(line.x - time.x) <= 0.20,
+                      abs(line.x - time.x) <= 0.30,
                       let name = stationCandidate(line.text) else { return nil }
-                return (name, line.y)
-            }
+                return (name, line.y, time.y - line.y)
+            }.sorted { $0.distance < $1.distance }
         }
         let pairs = stationCandidates[0].flatMap { left in
-            stationCandidates[1].compactMap { right -> (String, String)? in
+            stationCandidates[1].compactMap { right -> (String, String, CGFloat)? in
                 guard left.name != right.name, abs(left.y - right.y) <= 0.055 else { return nil }
-                return (left.name, right.name)
+                return (left.name, right.name, left.distance + right.distance)
             }
-        }
-        guard pairs.count == 1 else { return nil }
-        return pairs[0]
+        }.sorted { $0.2 < $1.2 }
+        guard let best = pairs.first,
+              pairs.dropFirst().first.map({ $0.2 - best.2 > 0.02 }) ?? true else { return nil }
+        return (best.0, best.1)
     }
 
     private func stationCandidate(_ raw: String) -> String? {

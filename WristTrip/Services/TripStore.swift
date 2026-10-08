@@ -46,12 +46,16 @@ final class TripStore: ObservableObject {
         persist()
     }
 
-    /// Finds an imported ticket with the same train, departure instant, and origin station.
-    /// Callers can ask the user whether to update it or save another record.
+    /// Prefer the order number; use the route and departure instant for tickets without one.
     func duplicate(of ticket: Ticket) -> Ticket? {
-        tickets.first { existing in
-            existing.id != ticket.id && existing.train.caseInsensitiveCompare(ticket.train) == .orderedSame
-                && existing.from == ticket.from && existing.plannedDepartureAt == ticket.plannedDepartureAt
+        let order = ticket.orderNumber.replacingOccurrences(of: " ", with: "").uppercased()
+        return tickets.first { existing in
+            guard existing.id != ticket.id else { return false }
+            let existingOrder = existing.orderNumber.replacingOccurrences(of: " ", with: "").uppercased()
+            if !order.isEmpty && !existingOrder.isEmpty { return order == existingOrder }
+            return existing.train.caseInsensitiveCompare(ticket.train) == .orderedSame
+                && existing.from == ticket.from && existing.plannedDepartureAt != nil
+                && existing.plannedDepartureAt == ticket.plannedDepartureAt
         }
     }
 
