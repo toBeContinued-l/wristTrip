@@ -1,6 +1,7 @@
 import Foundation
 #if canImport(UIKit)
 import UIKit
+import ImageIO
 #endif
 @preconcurrency import Vision
 
@@ -79,14 +80,33 @@ enum TicketOCRServiceError: LocalizedError {
 
 struct TicketOCRService {
 #if canImport(UIKit)
-    /// Backwards-compatible raw OCR entry point. The review flow uses recognizeLines(in:)
-    /// so parsing can use the text's image coordinates.
+    /// Backwards-compatible raw OCR entry point. The review flow uses recognizeFields(in:).
     func recognizeText(in image: UIImage) async throws -> String {
         try await recognizeLines(in: image).map(\.text).joined(separator: "\n")
     }
 
     func recognizeLines(in image: UIImage) async throws -> [OCRLine] {
         guard let cgImage = image.cgImage else { throw TicketOCRServiceError.invalidImage }
+        return try await recognizeLines(in: cgImage, orientation: image.cgImageOrientation,
+                                        region: CGRect(x: 0, y: 0, width: 1, height: 1),
+                                        languageCorrection: true)
+    }
+
+    func recognizeFields(in image: UIImage) async throws -> OCRTicketFields {
+        let lines = try await recognizeLines(in: image)
+        var fields = parse(lines)
+        guard fields.orderNumber == nil, let cgImage = image.cgImage else { return fields }
+        let headerLines = try? await recognizeLines(in: cgImage, orientation: image.cgImageOrientation,
+                                                    region: CGRect(x: 0, y: 0.55, width: 1, height: 0.45),
+                                                    languageCorrection: false)
+        if let headerLines {
+            fields.orderNumber = orderNumber(in: headerLines) ?? orderNumber(in: lines + headerLines)
+        }
+        return fields
+    }
+
+    private func recognizeLines(in cgImage: CGImage, orientation: CGImagePropertyOrientation,
+                                region: CGRect, languageCorrection: Bool) async throws -> [OCRLine] {
         return try await withCheckedThrowingContinuation { continuation in
             let request = VNRecognizeTextRequest { request, error in
                 if let error {
@@ -108,10 +128,11 @@ struct TicketOCRService {
             }
             request.recognitionLevel = .accurate
             request.recognitionLanguages = ["zh-Hans", "en-US"]
-            request.usesLanguageCorrection = true
+            request.usesLanguageCorrection = languageCorrection
+            request.regionOfInterest = region
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+                    try VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:]).perform([request])
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -266,7 +287,7 @@ struct TicketOCRService {
 
         let nearby = labels.flatMap { label in
             lines.filter { line in
-                guard abs(line.y - label.y) < 0.09,
+                guard abs(line.y - label.y) < 0.16,
                       line.x >= label.x - 0.25, line.x <= 0.98 else { return false }
                 let text = compactOrderText(line.text)
                 return text != compactOrderText(label.text)
@@ -284,7 +305,7 @@ struct TicketOCRService {
     }
 
     private func orderTokens(in text: String) -> [String] {
-        let pattern = #"(?<![A-Z0-9])[A-Z]?\d{9,16}(?![A-Z0-9])"#
+        let pattern = #"(?<![A-Z0-9])(?:[A-Z]{1,2}\d{8,16}|\d{9,16})(?![A-Z0-9])"#
         return matches(text, pattern).filter { token in
             // A bare phone number beside the label is more likely contact information.
             token.range(of: #"^1[3-9]\d{9}$"#, options: .regularExpression) == nil
@@ -441,3 +462,21 @@ struct TicketOCRService {
         }
     }
 }
+
+#if canImport(UIKit)
+private extension UIImage {
+    var cgImageOrientation: CGImagePropertyOrientation {
+        switch imageOrientation {
+        case .up: return .up
+        case .down: return .down
+        case .left: return .left
+        case .right: return .right
+        case .upMirrored: return .upMirrored
+        case .downMirrored: return .downMirrored
+        case .leftMirrored: return .leftMirrored
+        case .rightMirrored: return .rightMirrored
+        @unknown default: return .up
+        }
+    }
+}
+#endif

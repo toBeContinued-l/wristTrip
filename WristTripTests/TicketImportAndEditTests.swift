@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import XCTest
 @testable import WristTrip
 
@@ -260,6 +261,33 @@ final class TicketImportAndEditTests: XCTestCase {
         XCTAssertEqual(fields.orderNumber, "E123456789")
     }
 
+    func testProvidedOrderDetailScreenshotOCRLines() {
+        let fields = TicketOCRService().parse([
+            line("订单详情", 0.497, 0.917),
+            line("订单号：EN35012368", 0.167, 0.876),
+            line("下单时间：2026.09.29", 0.822, 0.876),
+            line("22:05", 0.165, 0.814),
+            line("G8903〉", 0.500, 0.821),
+            line("22:26", 0.830, 0.814),
+            line("北京南〉", 0.145, 0.784),
+            line("经停站", 0.498, 0.798),
+            line("廊坊〉", 0.874, 0.784),
+            line("历时21分", 0.502, 0.778),
+            line("发车时间：2026.09.29 星期二", 0.296, 0.739),
+            line("车票当日当次有效", 0.788, 0.740),
+            line("检票口13A、13B（如有变更，请以现场公告为准）", 0.398, 0.699)
+        ])
+
+        XCTAssertEqual(fields.orderNumber, "EN35012368")
+        XCTAssertEqual(fields.train, "G8903")
+        XCTAssertEqual(fields.travelDate, "2026-09-29")
+        XCTAssertEqual(fields.departureTime, "22:05")
+        XCTAssertEqual(fields.arrivalTime, "22:26")
+        XCTAssertEqual(fields.from, "北京南")
+        XCTAssertEqual(fields.to, "廊坊")
+        XCTAssertEqual(fields.gate, "13A、13B")
+    }
+
     func testOrderNumberBesideUpperLeftLabel() {
         let fields = TicketOCRService().parse([
             line("订单号", 0.12, 0.95),
@@ -284,6 +312,32 @@ final class TicketImportAndEditTests: XCTestCase {
             line("G1088", 0.5, 0.75)
         ])
         XCTAssertEqual(fields.orderNumber, "E123456789")
+    }
+
+    func testOrderNumberBelowUpperLeftLabel() {
+        let fields = TicketOCRService().parse([
+            line("订单号：", 0.12, 0.95),
+            line("E123456789", 0.26, 0.82),
+            line("G1088", 0.5, 0.70)
+        ])
+        XCTAssertEqual(fields.orderNumber, "E123456789")
+    }
+
+    func testOrderNumberRecognizedFromImage() async throws {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 1200, height: 1600)).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 1200, height: 1600))
+            let style: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 44, weight: .medium),
+                .foregroundColor: UIColor.black
+            ]
+            ("订单号：" as NSString).draw(at: CGPoint(x: 45, y: 65), withAttributes: style)
+            ("EN35012368" as NSString).draw(at: CGPoint(x: 45, y: 133), withAttributes: style)
+            ("G1088" as NSString).draw(at: CGPoint(x: 510, y: 480), withAttributes: style)
+        }
+
+        let fields = try await TicketOCRService().recognizeFields(in: image)
+        XCTAssertEqual(fields.orderNumber, "EN35012368")
     }
 
     func testOrderNumberKeepsEntireLongValue() {
@@ -353,6 +407,39 @@ final class TicketImportAndEditTests: XCTestCase {
         object.removeValue(forKey: "orderNumber")
         let legacy = try JSONSerialization.data(withJSONObject: object)
         XCTAssertEqual(try JSONDecoder().decode(Ticket.self, from: legacy).orderNumber, "")
+    }
+
+    @MainActor
+    func testArrivalMovesPinnedJourneyToHistoryAndSelectsNextActivity() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let store = TripStore(defaults: defaults)
+        let departureA = Ticket.scheduleDate(day: "2026-10-09", time: "08:00")!
+        let arrivalA = Ticket.scheduleDate(day: "2026-10-09", time: "09:00")!
+        let departureB = Ticket.scheduleDate(day: "2026-10-09", time: "09:20")!
+        let arrivalB = Ticket.scheduleDate(day: "2026-10-09", time: "10:00")!
+        let first = Ticket(id: UUID(), train: "G1", date: "2026-10-09", departTime: "08:00",
+                           arriveTime: "09:00", from: "北京南", to: "天津南", carriage: "01车",
+                           seat: "01A", waitingRoom: "待公布", gate: "待公布", status: .onboard,
+                           syncText: "已同步", plannedDepartureAt: departureA, plannedArrivalAt: arrivalA)
+        let second = Ticket(id: UUID(), train: "G2", date: "2026-10-09", departTime: "09:20",
+                            arriveTime: "10:00", from: "天津南", to: "济南西", carriage: "02车",
+                            seat: "02A", waitingRoom: "待公布", gate: "待公布", status: .upcoming,
+                            syncText: "已同步", plannedDepartureAt: departureB, plannedArrivalAt: arrivalB)
+        store.add(first)
+        store.add(second)
+        store.selectForWatch(id: first.id)
+
+        XCTAssertEqual(store.currentTicket(at: arrivalA.addingTimeInterval(-1))?.id, first.id)
+        XCTAssertEqual(TripActivityService.ticketForActivity(tickets: store.tickets, selectedTicketID: first.id,
+                                                               now: arrivalA.addingTimeInterval(-1))?.id, first.id)
+
+        XCTAssertEqual(first.status(at: arrivalA), .arrived)
+        store.refreshStatuses(at: arrivalA)
+        XCTAssertEqual(store.tickets.first { $0.id == first.id }?.status, .arrived)
+        XCTAssertEqual(TripStore(defaults: defaults).tickets.first { $0.id == first.id }?.status, .arrived)
+        XCTAssertEqual(store.currentTicket(at: arrivalA)?.id, second.id)
+        XCTAssertEqual(TripActivityService.ticketForActivity(tickets: store.tickets, selectedTicketID: first.id,
+                                                               now: arrivalA)?.id, second.id)
     }
 
     private func line(_ text: String, _ x: CGFloat, _ y: CGFloat) -> OCRLine {

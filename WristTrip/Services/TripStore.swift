@@ -87,6 +87,22 @@ final class TripStore: ObservableObject {
         }
     }
 
+    func refreshStatuses(at now: Date) {
+        var updated = tickets
+        var changed = false
+        for index in updated.indices {
+            let status = updated[index].status(at: now)
+            if updated[index].status != status {
+                updated[index].status = status
+                changed = true
+            }
+        }
+        if changed {
+            tickets = updated
+            persist()
+        }
+    }
+
     /// Chooses the explicitly pinned watch ticket first, then an active ticket, then the nearest future ticket.
     func currentTicket(at now: Date = Date()) -> Ticket? {
         if let selectedTicketID,

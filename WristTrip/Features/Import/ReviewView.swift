@@ -266,8 +266,7 @@ struct ReviewView: View {
                 guard let data = try await item.loadTransferable(type: Data.self),
                       let selectedImage = UIImage(data: data) else { throw TicketOCRServiceError.invalidImage }
                 let service = TicketOCRService()
-                let fields = try await service.recognizeLines(in: selectedImage)
-                let result = service.parse(fields)
+                let result = try await service.recognizeFields(in: selectedImage)
                 guard recognitionID == requestID else { return }
                 image = selectedImage
                 apply(result)
@@ -288,9 +287,9 @@ struct ReviewView: View {
         isRecognizing = true
         Task {
             do {
-                let lines = try await TicketOCRService().recognizeLines(in: selectedImage)
+                let fields = try await TicketOCRService().recognizeFields(in: selectedImage)
                 guard recognitionID == requestID else { return }
-                apply(TicketOCRService().parse(lines))
+                apply(fields)
             } catch {
                 guard recognitionID == requestID else { return }
                 recognitionError = error.localizedDescription

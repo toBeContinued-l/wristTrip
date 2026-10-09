@@ -7,8 +7,7 @@ struct ContentView: View {
     @StateObject private var tripStore = TripStore()
     @State private var showingImport = false
     @State private var showingWatch = false
-    @State private var showingCurrentDetail = false
-    @State private var currentDetailTicketID: UUID?
+    @State private var currentDetailTicket: Ticket?
     @State private var toast: String?
     @State private var watchSyncFeedback: String?
     @State private var clock = Date()
@@ -73,16 +72,18 @@ struct ContentView: View {
             }
                 .presentationDetents([.medium, .large])
         }
-        .sheet(isPresented: $showingCurrentDetail) {
-            if let id = currentDetailTicketID, let ticket = tickets.first(where: { $0.id == id }) {
-                NavigationStack {
-                    TicketDetailView(ticket: displayTicket(ticket), demoFeedback: $demoFeedback,
-                                     onSync: { syncTicket(id: ticket.id) },
-                                     onDemo: { startActivityDemo(id: ticket.id) },
-                                     onDelete: { deleteTicket(id: ticket.id); showingCurrentDetail = false },
-                                     onUpdate: { saveEditedTicket($0) })
-                        .toolbar { ToolbarItem(placement: .topBarLeading) { Button("完成") { showingCurrentDetail = false } } }
-                }
+        .sheet(item: $currentDetailTicket) { presentedTicket in
+            NavigationStack {
+                TicketDetailView(ticket: displayTicket(tickets.first(where: { $0.id == presentedTicket.id }) ?? presentedTicket),
+                                 demoFeedback: $demoFeedback,
+                                 onSync: { syncTicket(id: presentedTicket.id) },
+                                 onDemo: { startActivityDemo(id: presentedTicket.id) },
+                                 onDelete: { deleteTicket(id: presentedTicket.id); currentDetailTicket = nil },
+                                 onUpdate: { updated in
+                                     saveEditedTicket(updated)
+                                     currentDetailTicket = updated
+                                 })
+                    .toolbar { ToolbarItem(placement: .topBarLeading) { Button("完成") { currentDetailTicket = nil } } }
             }
         }
         .overlay(alignment: .bottom) {
@@ -113,15 +114,18 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 checkSharedInbox()
-                refreshActivity()
+                refreshStatuses()
             }
         }
         .task {
             checkSharedInbox()
-            refreshActivity()
             while !Task.isCancelled {
                 refreshStatuses()
-                try? await Task.sleep(for: .seconds(60))
+                do {
+                    try await Task.sleep(for: .seconds(60))
+                } catch {
+                    break
+                }
             }
         }
     }
@@ -139,8 +143,8 @@ struct ContentView: View {
     private var tripList: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Text("行程").font(.title2.weight(.bold))
-                if let ticket = currentTicket { CurrentTicketCard(ticket: displayTicket(ticket), onSync: syncCurrent, onWatch: { showingWatch = true }, onDetail: { currentDetailTicketID = ticket.id; showingCurrentDetail = true }) }
+                Text("当前行程").font(.title2.weight(.bold))
+                if let ticket = currentTicket { CurrentTicketCard(ticket: displayTicket(ticket), onSync: syncCurrent, onWatch: { showingWatch = true }, onDetail: { currentDetailTicket = ticket }) }
                 if !tickets.isEmpty, let activityFeedback {
                     Label(activityFeedback, systemImage: "bolt.horizontal.circle")
                         .font(.caption).foregroundStyle(.secondary)
@@ -320,17 +324,8 @@ struct ContentView: View {
 
     private func refreshStatuses() {
         clock = Date()
-        var changed = false
-        for index in tickets.indices {
-            let resolved = tickets[index].status(at: clock)
-            if tickets[index].status != resolved {
-                var ticket = tickets[index]
-                ticket.status = resolved
-                tripStore.update(ticket)
-                changed = true
-            }
-        }
-        if changed || !tickets.isEmpty { refreshActivity() }
+        tripStore.refreshStatuses(at: clock)
+        refreshActivity()
     }
 
     private func deleteAllTickets() {

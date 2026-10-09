@@ -52,18 +52,7 @@ struct TripActivityService {
             }
             return .demoActive
         }
-        let eligible = tickets.filter { ticket in
-            guard !ticket.isDraft, let departure = ticket.plannedDepartureAt,
-                  let arrival = ticket.plannedArrivalAt else { return false }
-            let start = departure.addingTimeInterval(-3 * 60 * 60)
-            return start <= now && now < min(arrival, start.addingTimeInterval(8 * 60 * 60))
-        }
-        // An ongoing journey wins over the next train, even when that next train
-        // entered its three-hour window or was selected in the watch app.
-        let active = eligible.filter { ($0.plannedDepartureAt ?? .distantFuture) <= now }
-        let candidates = active.isEmpty ? eligible : active
-        let selected = candidates.first { $0.id == selectedTicketID }
-            ?? candidates.min { ($0.plannedDepartureAt ?? .distantFuture) < ($1.plannedDepartureAt ?? .distantFuture) }
+        let selected = ticketForActivity(tickets: tickets, selectedTicketID: selectedTicketID, now: now)
 
         for activity in activities where activity.attributes.ticketID != selected?.id {
             await activity.end(nil, dismissalPolicy: .immediate)
@@ -101,6 +90,21 @@ struct TripActivityService {
         )
         _ = try Activity.request(attributes: attributes, content: content, pushType: nil)
         return .started(selected.id)
+    }
+
+    static func ticketForActivity(tickets: [Ticket], selectedTicketID: UUID?, now: Date) -> Ticket? {
+        let eligible = tickets.filter { ticket in
+            guard !ticket.isDraft, let departure = ticket.plannedDepartureAt,
+                  let arrival = ticket.plannedArrivalAt else { return false }
+            let start = departure.addingTimeInterval(-3 * 60 * 60)
+            return start <= now && now < min(arrival, start.addingTimeInterval(8 * 60 * 60))
+        }
+        // An ongoing journey wins over the next train, even when that next train
+        // entered its three-hour window or was selected in the watch app.
+        let active = eligible.filter { ($0.plannedDepartureAt ?? .distantFuture) <= now }
+        let candidates = active.isEmpty ? eligible : active
+        return candidates.first { $0.id == selectedTicketID }
+            ?? candidates.min { ($0.plannedDepartureAt ?? .distantFuture) < ($1.plannedDepartureAt ?? .distantFuture) }
     }
 }
 
