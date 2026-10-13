@@ -201,7 +201,8 @@ struct ReviewView: View {
             }
         } else {
             let required = [("车次", train), ("出行日期", travelDate), ("计划发车", departure),
-                            ("到站日期", arrivalDate), ("计划到站", arrival), ("出发站", from), ("到达站", to)]
+                            ("到站日期", arrivalDate), ("计划到站", arrival), ("出发站", from),
+                            ("到达站", to), ("车厢", carriage), ("座位", seat)]
             let missing = required.filter { trimmed($0.1).isEmpty }.map(\.0)
             guard missing.isEmpty else {
                 validationMessage = "请补充：" + missing.joined(separator: "、")

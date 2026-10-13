@@ -68,7 +68,7 @@ struct WatchTripsView: View {
                         Text(syncError).font(.caption2).foregroundStyle(.orange)
                     }
                 }
-                .navigationTitle("抬腕车次")
+                .navigationTitle("腕上车次")
             }
         }
     }
@@ -80,25 +80,16 @@ private struct WatchTicketRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text(ticket.train).font(.headline)
-                Spacer(minLength: 3)
-                Text(ticket.status(at: now)).font(.caption2).foregroundStyle(.green)
-            }
-            Text("\(ticket.origin) → \(ticket.destination)")
-                .font(.subheadline)
-                .lineLimit(2)
-            Text("计划 \(WatchDateText.format(ticket.departureAt, timezone: ticket.timezone, pattern: "M月d日 HH:mm"))")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("\(WatchTicket.display(ticket.carriage, fallback: "车厢待补充")) · \(WatchTicket.display(ticket.seat, fallback: "座位待补充"))")
-                .font(.caption)
-            if let seatClass = ticket.seatClass, !seatClass.isEmpty {
-                Text(seatClass).font(.caption2).foregroundStyle(.secondary)
-            }
-            if let fare = ticket.fare, !fare.isEmpty {
-                Text("票价 \(fare)").font(.caption2).foregroundStyle(.secondary)
-            }
+            TrainTicketCard(
+                train: ticket.train, origin: ticket.origin, destination: ticket.destination,
+                departureText: WatchDateText.format(ticket.departureAt, timezone: ticket.timezone, pattern: "HH:mm"),
+                arrivalText: ticket.arrivalAt.map { WatchDateText.format($0, timezone: ticket.timezone, pattern: "HH:mm") } ?? "",
+                gate: ticket.gate, waitingRoom: ticket.waitingRoom,
+                carriage: ticket.carriage, seat: ticket.seat,
+                departureAt: ticket.departureAt, arrivalAt: ticket.arrivalAt
+            )
+            Text("\(WatchDateText.format(ticket.departureAt, timezone: ticket.timezone, pattern: "M月d日")) · \(ticket.status(at: now))")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 }

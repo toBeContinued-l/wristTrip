@@ -4,6 +4,9 @@ import Foundation
 struct TripActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
         let plannedStatus: String
+        // Optional so activities created before the gate field remain decodable.
+        var gate: String? = nil
+        var waitingRoom: String? = nil
     }
 
     let ticketID: UUID
@@ -17,5 +20,4 @@ struct TripActivityAttributes: ActivityAttributes {
     let seat: String
     let seatClass: String
     let fare: String
-    let demoExpiresAt: Date?
 }

@@ -24,9 +24,7 @@ final class TripStore: ObservableObject {
         } else {
             tickets = []
         }
-        if let rawID = defaults.string(forKey: selectedKey) {
-            selectedTicketID = UUID(uuidString: rawID)
-        }
+        selectedTicketID = defaults.string(forKey: selectedKey).flatMap(UUID.init(uuidString:))
         pruneSelection()
     }
 
@@ -87,13 +85,30 @@ final class TripStore: ObservableObject {
         }
     }
 
-    func refreshStatuses(at now: Date) {
+    @discardableResult
+    func refreshStatuses(at now: Date) -> Bool {
         var updated = tickets
         var changed = false
+        var arrivedTicketIDs = Set<UUID>()
         for index in updated.indices {
             let status = updated[index].status(at: now)
             if updated[index].status != status {
+                if status == .arrived {
+                    arrivedTicketIDs.insert(updated[index].id)
+                }
                 updated[index].status = status
+                changed = true
+            }
+        }
+        let selectedTicketArrived = selectedTicketID.map { selectedID in
+            updated.first(where: { $0.id == selectedID })?.status == .arrived
+        } ?? false
+        if selectedTicketArrived || (selectedTicketID == nil && !arrivedTicketIDs.isEmpty) {
+            // Persist the next Watch choice at the arrival boundary. The
+            // arrived ticket remains in history; only the active selection moves.
+            let nextSelection = Self.nextWatchTicketID(in: updated, at: now)
+            if self.selectedTicketID != nextSelection {
+                self.selectedTicketID = nextSelection
                 changed = true
             }
         }
@@ -101,6 +116,21 @@ final class TripStore: ObservableObject {
             tickets = updated
             persist()
         }
+        return changed
+    }
+
+    private static func nextWatchTicketID(in tickets: [Ticket], at now: Date) -> UUID? {
+        let eligible = tickets.filter { ticket in
+            guard ticket.status(at: now) != .arrived else { return false }
+            guard !ticket.isDraft else { return false }
+            return ticket.plannedDepartureAt != nil
+        }
+        let active = eligible.filter { ticket in
+            guard let departure = ticket.plannedDepartureAt else { return false }
+            return departure <= now && now < (ticket.plannedArrivalAt ?? .distantFuture)
+        }
+        return (active.isEmpty ? eligible : active)
+            .min { ($0.plannedDepartureAt ?? .distantFuture) < ($1.plannedDepartureAt ?? .distantFuture) }?.id
     }
 
     /// Chooses the explicitly pinned watch ticket first, then an active ticket, then the nearest future ticket.
@@ -119,18 +149,6 @@ final class TripStore: ObservableObject {
         return tickets
             .filter { ($0.plannedDepartureAt ?? .distantPast) > now }
             .min { ($0.plannedDepartureAt ?? .distantFuture) < ($1.plannedDepartureAt ?? .distantFuture) }
-    }
-
-    func hasConflict(_ ticket: Ticket) -> Bool {
-        conflictingTickets(for: ticket).isEmpty == false
-    }
-
-    func conflictingTickets(for ticket: Ticket) -> [Ticket] {
-        guard let departure = ticket.plannedDepartureAt, let arrival = ticket.plannedArrivalAt else { return [] }
-        return tickets.filter { other in
-            guard other.id != ticket.id, let otherDeparture = other.plannedDepartureAt, let otherArrival = other.plannedArrivalAt else { return false }
-            return departure < otherArrival && otherDeparture < arrival
-        }
     }
 
     private func pruneSelection() {

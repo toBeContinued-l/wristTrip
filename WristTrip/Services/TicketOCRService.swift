@@ -80,11 +80,6 @@ enum TicketOCRServiceError: LocalizedError {
 
 struct TicketOCRService {
 #if canImport(UIKit)
-    /// Backwards-compatible raw OCR entry point. The review flow uses recognizeFields(in:).
-    func recognizeText(in image: UIImage) async throws -> String {
-        try await recognizeLines(in: image).map(\.text).joined(separator: "\n")
-    }
-
     func recognizeLines(in image: UIImage) async throws -> [OCRLine] {
         guard let cgImage = image.cgImage else { throw TicketOCRServiceError.invalidImage }
         return try await recognizeLines(in: cgImage, orientation: image.cgImageOrientation,
@@ -413,7 +408,9 @@ struct TicketOCRService {
             }
         }.sorted { $0.2 < $1.2 }
         guard let best = pairs.first,
-              pairs.dropFirst().first.map({ abs($0.2 - best.2) > 0.01 }) ?? true else { return nil }
+              // Nearby station rows can both align with the opposite column.
+              // Keep them for manual review unless one pairing clearly wins.
+              pairs.dropFirst().first.map({ $0.2 - best.2 > 0.03 }) ?? true else { return nil }
         return (best.0, best.1)
     }
 

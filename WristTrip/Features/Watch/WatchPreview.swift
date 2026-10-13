@@ -1,64 +1,61 @@
 import SwiftUI
 
 struct WatchPreview: View {
+    @Environment(\.colorScheme) private var colorScheme
     let ticket: Ticket
     let onSync: () -> Void
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text(ticket.train).font(.title2.bold())
-                        Spacer()
-                        Text(ticket.status.rawValue).font(.caption.weight(.semibold))
-                    }
-                    Text("\(ticket.from) → \(ticket.to)")
-                        .font(.headline)
-                        .lineLimit(2)
-                    Text("计划 \(ticket.date) \(ticket.departTime)")
-                        .font(.subheadline)
-                    Text("\(display(ticket.carriage)) · \(display(ticket.seat))")
-                        .font(.subheadline.weight(.semibold))
-                    if !ticket.seatClass.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(ticket.seatClass).font(.caption)
-                    }
-                    if !ticket.fare.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text("票价 \(ticket.fare)").font(.caption)
-                    }
-                }
-                .foregroundStyle(.white)
-                .padding(16)
-                .frame(maxWidth: 210, alignment: .leading)
-                .background(Color.indigo, in: RoundedRectangle(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 12) {
+                TrainTicketCard(train: ticket.train, origin: ticket.from, destination: ticket.to,
+                                departureText: departureText, arrivalText: arrivalText,
+                                gate: ticket.gate, waitingRoom: ticket.waitingRoom,
+                                carriage: ticket.carriage, seat: ticket.seat,
+                                departureAt: ticket.plannedDepartureAt,
+                                arrivalAt: ticket.plannedArrivalAt)
+                    .frame(width: 184)
+                    .frame(maxWidth: .infinity)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("车票详情").font(.headline)
-                    detail("席别", display(ticket.seatClass))
-                    detail("候车室", display(ticket.waitingRoom, fallback: "待公布"))
-                    detail("检票口", display(ticket.gate, fallback: "待公布"))
-                }
-                Button(action: onSync) {
-                    Label("显示到智能叠放", systemImage: "applewatch.and.arrow.forward")
-                }
-                .buttonStyle(.borderedProminent)
+                Text("车票详情")
+                    .font(.headline)
+                    .padding(.top, 6)
+                TicketSummaryPanel(ticket: ticket)
+                TicketOnsitePanel(ticket: ticket)
             }
-            .padding(20)
+            .padding(16)
         }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Button(action: onSync) {
+                Label("显示到智能叠放", systemImage: "applewatch.and.arrow.forward")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(.bar)
+        }
+        .background(TripPalette.page(for: colorScheme).ignoresSafeArea())
         .navigationTitle("智能叠放预览")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func display(_ value: String, fallback: String = "待补充") -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? fallback : trimmed
+    private var departureText: String {
+        guard let date = ticket.plannedDepartureAt else { return ticket.departTime }
+        return formatted(date, pattern: "HH:mm")
     }
 
-    private func detail(_ title: String, _ value: String) -> some View {
-        HStack {
-            Text(title).foregroundStyle(.secondary)
-            Spacer()
-            Text(value).multilineTextAlignment(.trailing)
-        }
-        .font(.subheadline)
+    private var arrivalText: String {
+        guard let date = ticket.plannedArrivalAt else { return ticket.arriveTime }
+        return formatted(date, pattern: "HH:mm")
     }
+
+    private func formatted(_ date: Date, pattern: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = ticket.displayTimezone
+        formatter.dateFormat = pattern
+        return formatter.string(from: date)
+    }
+
 }

@@ -20,7 +20,7 @@ final class ShareViewController: UIViewController {
         statusLabel.numberOfLines = 0
         statusLabel.textAlignment = .center
         statusLabel.font = .preferredFont(forTextStyle: .headline)
-        actionButton.setTitle("保存到抬腕车次", for: .normal)
+        actionButton.setTitle("保存到腕上车次", for: .normal)
         actionButton.isEnabled = !providers.isEmpty
         actionButton.addTarget(self, action: #selector(importImages), for: .touchUpInside)
 
@@ -65,7 +65,7 @@ final class ShareViewController: UIViewController {
             guard let self else { return }
             self.isImporting = false
             if saved > 0 {
-                self.statusLabel.text = "已保存 \(saved) 张图片。打开抬腕车次核对车票。"
+                self.statusLabel.text = "已保存 \(saved) 张图片。打开腕上车次核对车票。"
                 self.actionButton.setTitle("完成", for: .normal)
                 self.actionButton.removeTarget(self, action: #selector(self.importImages), for: .touchUpInside)
                 self.actionButton.addTarget(self, action: #selector(self.finish), for: .touchUpInside)

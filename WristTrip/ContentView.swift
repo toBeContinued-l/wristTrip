@@ -1,25 +1,32 @@
 import SwiftUI
 
 struct ContentView: View {
+    private let onReady: () -> Void
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
-    @State private var selectedTab = 0
     @StateObject private var tripStore = TripStore()
+    @StateObject private var pushService = ActivityPushTokenService.shared
     @State private var showingImport = false
     @State private var showingWatch = false
     @State private var currentDetailTicket: Ticket?
+    @State private var activeHistoryActionID: UUID?
+    @State private var pendingHistoryDeletionID: UUID?
     @State private var toast: String?
-    @State private var watchSyncFeedback: String?
     @State private var clock = Date()
     @State private var sharedImageURL: URL?
     @State private var sharedImage: UIImage?
     @State private var syncGeneration = 0
     @State private var activityFeedback: String?
-    @State private var demoFeedback: String?
     @State private var activityRefreshTask: Task<Void, Never>?
+    @State private var nextRefreshAt: Date?
     @State private var activityGeneration = 0
     @AppStorage("wristTrip.liveActivitiesEnabled") private var liveActivitiesEnabled = true
+    @AppStorage("wristTrip.remoteScheduleEnabled") private var remoteScheduleEnabled = false
     @AppStorage("wristTrip.appearanceMode") private var appearanceModeRaw = AppearanceMode.system.rawValue
+
+    init(onReady: @escaping () -> Void = {}) {
+        self.onReady = onReady
+    }
 
     private var tickets: [Ticket] { tripStore.tickets }
 
@@ -28,26 +35,21 @@ struct ContentView: View {
     }
 
     var body: some View {
-        TabView(selection: $selectedTab) {
+        TabView {
             NavigationStack { tripList }
-                .tabItem { Label("行程", systemImage: "list.bullet.rectangle.portrait") }.tag(0)
-            NavigationStack {
-                if let ticket = currentTicket {
-                    WatchPreview(ticket: displayTicket(ticket), onSync: syncCurrent)
-                } else {
-                    watchEmptyState
-                }
-            }
-                .tabItem { Label("智能叠放", systemImage: "applewatch") }.tag(1)
+                .tabItem { Label("行程", systemImage: "list.bullet.rectangle.portrait") }
             NavigationStack {
                 SettingsView(showingWatch: $showingWatch, toast: $toast,
                              liveActivitiesEnabled: $liveActivitiesEnabled,
+                             remoteScheduleEnabled: $remoteScheduleEnabled,
+                             pushService: pushService,
                              appearanceModeRaw: $appearanceModeRaw,
                              onDeleteAll: deleteAllTickets,
-                             onLiveActivitiesChanged: { _ in refreshActivity() })
-                    .navigationTitle("设置")
+                             onLiveActivitiesChanged: { _ in refreshActivity() },
+                             onRemoteScheduleChanged: { refreshActivity() })
+                .navigationTitle("设置")
             }
-                .tabItem { Label("设置", systemImage: "gearshape") }.tag(2)
+                .tabItem { Label("设置", systemImage: "gearshape") }
         }
         .tint(.indigo)
         .preferredColorScheme(AppearanceMode(rawValue: appearanceModeRaw)?.colorScheme)
@@ -75,28 +77,16 @@ struct ContentView: View {
         .sheet(item: $currentDetailTicket) { presentedTicket in
             NavigationStack {
                 TicketDetailView(ticket: displayTicket(tickets.first(where: { $0.id == presentedTicket.id }) ?? presentedTicket),
-                                 demoFeedback: $demoFeedback,
                                  onSync: { syncTicket(id: presentedTicket.id) },
-                                 onDemo: { startActivityDemo(id: presentedTicket.id) },
                                  onDelete: { deleteTicket(id: presentedTicket.id); currentDetailTicket = nil },
                                  onUpdate: { updated in
                                      saveEditedTicket(updated)
-                                     currentDetailTicket = updated
                                  })
                     .toolbar { ToolbarItem(placement: .topBarLeading) { Button("完成") { currentDetailTicket = nil } } }
             }
         }
         .overlay(alignment: .bottom) {
             VStack(spacing: 8) {
-                if let watchSyncFeedback {
-                    Text(watchSyncFeedback).font(.subheadline.weight(.medium)).foregroundStyle(.white)
-                        .padding(.horizontal, 16).padding(.vertical, 11)
-                        .background(.indigo, in: Capsule())
-                        .task(id: watchSyncFeedback) {
-                            try? await Task.sleep(for: .seconds(4))
-                            if self.watchSyncFeedback == watchSyncFeedback { self.watchSyncFeedback = nil }
-                        }
-                }
                 if let toast {
                     Text(toast).font(.subheadline.weight(.medium)).foregroundStyle(.white)
                         .padding(.horizontal, 16).padding(.vertical, 11)
@@ -114,13 +104,26 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 checkSharedInbox()
-                refreshStatuses()
+                tripStore.load()
+                refreshStatuses(syncWatch: true)
+            } else {
+                nextRefreshAt = nil
+                TripBackgroundRefreshService.schedule(tickets: tickets)
             }
+        }
+        .task(id: nextRefreshAt) {
+            guard let deadline = nextRefreshAt else { return }
+            do {
+                try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSinceNow)))
+            } catch { return }
+            guard !Task.isCancelled, scenePhase == .active else { return }
+            refreshStatuses(syncWatch: true)
         }
         .task {
             checkSharedInbox()
+            onReady()
             while !Task.isCancelled {
-                refreshStatuses()
+                if scenePhase == .active { refreshStatuses() }
                 do {
                     try await Task.sleep(for: .seconds(60))
                 } catch {
@@ -141,26 +144,120 @@ struct ContentView: View {
     }
 
     private var tripList: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("当前行程").font(.title2.weight(.bold))
-                if let ticket = currentTicket { CurrentTicketCard(ticket: displayTicket(ticket), onSync: syncCurrent, onWatch: { showingWatch = true }, onDetail: { currentDetailTicket = ticket }) }
-                if !tickets.isEmpty, let activityFeedback {
-                    Label(activityFeedback, systemImage: "bolt.horizontal.circle")
-                        .font(.caption).foregroundStyle(.secondary)
+        ZStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("当前行程").font(.title2.weight(.bold))
+                    if let ticket = currentTicket {
+                        CurrentTicketCard(ticket: displayTicket(ticket), onSync: { syncTicket(id: ticket.id) },
+                                          onWatch: { showingWatch = true },
+                                          onDetail: { currentDetailTicket = ticket })
+                    }
+                    if !tickets.isEmpty, let activityFeedback {
+                        Label(activityFeedback, systemImage: "bolt.horizontal.circle")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if tickets.isEmpty {
+                        ContentUnavailableView("暂无行程", systemImage: "ticket", description: Text("导入 12306 订单截图以添加车票"))
+                    }
+                    sectionHeader("接下来的行程", action: "导入车票") { showingImport = true }
+                    ForEach(tripStore.sortedTickets().filter { $0.status(at: clock) != .arrived && $0.id != currentTicket?.id }) { ticket in
+                        NavigationLink {
+                                             TicketDetailView(ticket: displayTicket(ticket),
+                                             onSync: { syncTicket(id: ticket.id) },
+                                             onDelete: { deleteTicket(id: ticket.id) },
+                                             onUpdate: { saveEditedTicket($0) })
+                        } label: {
+                            TicketRow(ticket: displayTicket(ticket))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    sectionHeader("历史记录", action: nil, actionHandler: nil)
+                    ForEach(tripStore.sortedTickets().filter { $0.status(at: clock) == .arrived }) { ticket in
+                        NavigationLink {
+                            TicketDetailView(ticket: displayTicket(ticket),
+                                             onSync: { syncTicket(id: ticket.id) },
+                                             onDelete: { deleteTicket(id: ticket.id) },
+                                             onUpdate: { saveEditedTicket($0) })
+                        } label: {
+                            TicketRow(ticket: displayTicket(ticket))
+                        }
+                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .highPriorityGesture(
+                            LongPressGesture(minimumDuration: 0.5)
+                                .onEnded { _ in
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        activeHistoryActionID = ticket.id
+                                    }
+                                }
+                        )
+                        .accessibilityHint("长按显示删除操作")
+                    }
+                    Label("信息来自导入截图与手动修改，不代表铁路实时状态", systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
                 }
-                if tickets.isEmpty {
-                    ContentUnavailableView("暂无行程", systemImage: "ticket", description: Text("导入 12306 订单截图以添加车票"))
-                }
-                sectionHeader("接下来的行程", action: "导入车票") { showingImport = true }
-                ForEach(tripStore.sortedTickets().filter { $0.status(at: clock) != .arrived && $0.id != currentTicket?.id }) { ticket in NavigationLink { TicketDetailView(ticket: displayTicket(ticket), demoFeedback: $demoFeedback, onSync: { syncTicket(id: ticket.id) }, onDemo: { startActivityDemo(id: ticket.id) }, onDelete: { deleteTicket(id: ticket.id) }, onUpdate: { saveEditedTicket($0) }) } label: { TicketRow(ticket: displayTicket(ticket)) }.buttonStyle(.plain) }
-                sectionHeader("历史记录", action: nil, actionHandler: nil)
-                ForEach(tripStore.sortedTickets().filter { $0.status(at: clock) == .arrived }) { ticket in NavigationLink { TicketDetailView(ticket: displayTicket(ticket), demoFeedback: $demoFeedback, onSync: { syncTicket(id: ticket.id) }, onDemo: { startActivityDemo(id: ticket.id) }, onDelete: { deleteTicket(id: ticket.id) }, onUpdate: { saveEditedTicket($0) }) } label: { TicketRow(ticket: displayTicket(ticket)) }.buttonStyle(.plain) }
-                Label("信息来自导入截图与手动修改，不代表铁路实时状态", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary).padding(.top, 4)
-            }.padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 24)
+                .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 24)
+            }
+            if let activeHistoryActionID,
+               let ticket = tickets.first(where: { $0.id == activeHistoryActionID }) {
+                historyActionOverlay(for: ticket)
+                    .transition(.opacity)
+                    .zIndex(10)
+            }
         }
-        .background(TripPalette.page(for: colorScheme).ignoresSafeArea()).navigationTitle("行程")
+        .background(TripPalette.page(for: colorScheme).ignoresSafeArea())
+        .navigationTitle("行程")
         .toolbar { ToolbarItem(placement: .topBarTrailing) { Button { showingImport = true } label: { Image(systemName: "plus") }.accessibilityLabel("导入车票") } }
+        .alert("删除历史车票？", isPresented: Binding(
+            get: { pendingHistoryDeletionID != nil },
+            set: { if !$0 { pendingHistoryDeletionID = nil } }
+        )) {
+            Button("取消", role: .cancel) { pendingHistoryDeletionID = nil }
+            Button("删除", role: .destructive) {
+                guard let id = pendingHistoryDeletionID else { return }
+                pendingHistoryDeletionID = nil
+                deleteTicket(id: id)
+            }
+        } message: {
+            Text("删除后将从本机和已同步的 Apple Watch 数据中移除，且无法恢复。")
+        }
+    }
+
+    private func historyActionOverlay(for ticket: Ticket) -> some View {
+        ZStack {
+            Color.black.opacity(0.48)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        activeHistoryActionID = nil
+                    }
+                }
+            VStack(spacing: 14) {
+                Text("历史车票")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Text("\(ticket.train) · \(ticket.from) → \(ticket.to)")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Button {
+                    activeHistoryActionID = nil
+                    pendingHistoryDeletionID = ticket.id
+                } label: {
+                    Label("删除这条记录", systemImage: "trash")
+                        .font(.headline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+            }
+            .padding(22)
+            .frame(maxWidth: 280)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18))
+            .shadow(color: .black.opacity(0.25), radius: 18, y: 8)
+        }
     }
 
     private func sectionHeader(_ title: String, action: String?, actionHandler: (() -> Void)? = nil) -> some View {
@@ -175,40 +272,10 @@ struct ContentView: View {
     private func syncTicket(id: UUID) {
         tripStore.selectForWatch(id: id)
         refreshActivity(requestedTicketID: id, reportToUser: true)
-        syncSnapshot(changedTicketID: id, selectedTicketID: id, manual: true)
+        syncSnapshot(changedTicketID: id, selectedTicketID: id)
     }
 
-    private func startActivityDemo(id: UUID) {
-        demoFeedback = nil
-        guard let ticket = tripStore.tickets.first(where: { $0.id == id }) else { return }
-        guard liveActivitiesEnabled else {
-            demoFeedback = "请先在设置中开启本机实时活动"
-            return
-        }
-        activityGeneration += 1
-        let generation = activityGeneration
-        let previous = activityRefreshTask
-        previous?.cancel()
-        activityRefreshTask = Task { @MainActor in
-            _ = await previous?.value
-            guard generation == activityGeneration else { return }
-            do {
-                let result = try await TripActivityService.startDemo(ticket: ticket)
-                guard generation == activityGeneration else { return }
-                switch result {
-                case .demoActive:
-                    demoFeedback = "演示实时活动已启动，可在 iPhone 锁屏查看。配对手表的智能叠放由系统决定何时展示。"
-                case .disabled:
-                    demoFeedback = "系统实时活动权限未开启，请在 iPhone 设置中启用"
-                default: break
-                }
-            } catch {
-                demoFeedback = "演示启动失败：\(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func syncSnapshot(changedTicketID: UUID? = nil, selectedTicketID: UUID? = nil, manual: Bool = false) {
+    private func syncSnapshot(changedTicketID: UUID? = nil, selectedTicketID: UUID? = nil) {
         syncGeneration += 1
         let generation = syncGeneration
         let selection = selectedTicketID ?? tripStore.selectedTicketID ?? tripStore.currentTicket(at: clock)?.id
@@ -219,14 +286,14 @@ struct ContentView: View {
                 switch receipt.delivery {
                 case .confirmed:
                     setSyncText("手表已保存", for: changedTicketID)
-                    if manual { watchSyncFeedback = "手表 App 已保存 \(receipt.ticketCount) 张车票" }
                 case .queued:
                     setSyncText("等待手表接收", for: changedTicketID)
-                    if manual { watchSyncFeedback = "已加入手表 App 同步队列（\(receipt.ticketCount) 张）" }
                 }
-            case .failure(let error):
+            case .failure(.appNotInstalled):
+                // The Watch App is optional; Live Activity and Smart Stack do not require it.
+                break
+            case .failure:
                 setSyncText("手表同步失败", for: changedTicketID)
-                if manual { watchSyncFeedback = error.localizedDescription }
             }
         }
     }
@@ -239,8 +306,10 @@ struct ContentView: View {
 
     private func saveEditedTicket(_ ticket: Ticket) {
         tripStore.update(ticket)
-        syncSnapshot(changedTicketID: ticket.id)
-        refreshActivity()
+        // Recompute the status and watch selection before publishing either
+        // external display. This also handles edits made while a journey is
+        // already between departure and arrival.
+        refreshStatuses(syncWatch: true, changedTicketID: ticket.id)
     }
 
     private func deleteTicket(id: UUID) {
@@ -249,40 +318,54 @@ struct ContentView: View {
         refreshActivity()
     }
 
-    private func refreshActivity(requestedTicketID: UUID? = nil, reportToUser: Bool = false) {
+    private func refreshActivity(requestedTicketID: UUID? = nil, reportToUser: Bool = false,
+                                 handoffTicketID: UUID? = nil) {
+        clock = Date()
+        scheduleStateRefresh()
         activityGeneration += 1
         let generation = activityGeneration
         let previous = activityRefreshTask
         let snapshot = tripStore.tickets
         let selectedID = tripStore.selectedTicketID ?? tripStore.currentTicket(at: clock)?.id
+        pushService.updateSchedule(tickets: snapshot, selectedTicketID: selectedID,
+                                   enabled: liveActivitiesEnabled && remoteScheduleEnabled)
         activityRefreshTask = Task { @MainActor in
             _ = await previous?.value
             guard generation == activityGeneration else { return }
             guard liveActivitiesEnabled else {
                 await TripActivityService.endAll()
                 guard generation == activityGeneration else { return }
+                scheduleStateRefresh()
                 activityFeedback = "本机实时活动开关已关闭"
                 if reportToUser { toast = activityFeedback }
                 return
             }
             do {
-                let result = try await TripActivityService.refresh(tickets: snapshot, selectedTicketID: selectedID, requestedTicketID: requestedTicketID)
+                let result = try await TripActivityService.refresh(tickets: snapshot,
+                                                                    selectedTicketID: selectedID,
+                                                                    requestedTicketID: requestedTicketID,
+                                                                    handoffTicketID: handoffTicketID)
                 guard generation == activityGeneration else { return }
                 switch result {
                 case .started(let id), .updated(let id):
                     activityFeedback = id == requestedTicketID || requestedTicketID == nil
                         ? "已启动 iPhone 实时活动；配对手表的智能叠放由系统决定何时展示"
                         : "当前乘坐车次优先展示；所选车次尚未显示"
+                case .restartedAfterTimeLimit:
+                    activityFeedback = "行程仍在进行，已按 8 小时上限重新展示实时活动"
                 case .ended: activityFeedback = "实时活动已结束"
                 case .noEligibleTicket: activityFeedback = "当前无符合展示条件的车票"
                 case .draft: activityFeedback = "车票信息不完整：请补齐车次、站名和计划出发／到站时间"
-                case .notInWindow(let start):
-                    activityFeedback = "尚未进入发车前 3 小时窗口（\(start.formatted(date: .abbreviated, time: .shortened)) 起）；离开 App 后自动启动尚未接入"
-                case .arrived: activityFeedback = "计划到站时间已过，不会启动实时活动"
-                case .timeLimitReached: activityFeedback = "已超过单次实时活动的 8 小时展示上限"
+                case .arrived: activityFeedback = "行程已到站，实时活动已结束"
                 case .disabled: activityFeedback = "系统实时活动权限未开启，请在 iPhone 设置中启用"
-                case .demoActive: activityFeedback = "演示实时活动运行中；配对手表的智能叠放由系统决定何时展示"
+                case .notInAutomaticWindow(let start):
+                    if start == .distantFuture {
+                        activityFeedback = "尚未到自动展示时间，需在行程卡片手动显示"
+                    } else {
+                        activityFeedback = "尚未到自动展示时间，将在 \(start.formatted(date: .omitted, time: .shortened)) 自动展示"
+                    }
                 }
+                scheduleStateRefresh()
                 if reportToUser { toast = activityFeedback }
             } catch {
                 guard generation == activityGeneration else { return }
@@ -290,6 +373,14 @@ struct ContentView: View {
                 if reportToUser { toast = activityFeedback }
             }
         }
+    }
+
+    private func scheduleStateRefresh() {
+        let now = Date()
+        nextRefreshAt = scenePhase == .active
+            ? TripBackgroundRefreshService.nextBoundary(tickets: tickets, after: now,
+                                                         manualDeadline: TripActivityService.nextManualActivityDeadline) : nil
+        TripBackgroundRefreshService.schedule(tickets: tickets, now: now)
     }
 
     private func checkSharedInbox() {
@@ -322,10 +413,23 @@ struct ContentView: View {
         return copy
     }
 
-    private func refreshStatuses() {
+    private func refreshStatuses(syncWatch: Bool = false, changedTicketID: UUID? = nil) {
+        let previousSelection = tripStore.selectedTicketID
+        let previousSelectedTicket = previousSelection.flatMap { id in
+            tripStore.tickets.first(where: { $0.id == id })
+        }
         clock = Date()
-        tripStore.refreshStatuses(at: clock)
-        refreshActivity()
+        let changed = tripStore.refreshStatuses(at: clock)
+        if changed || syncWatch { syncSnapshot(changedTicketID: changedTicketID) }
+        let handoffTicketID: UUID?
+        if let previousSelection,
+           previousSelectedTicket?.plannedArrivalAt.map({ clock >= $0 }) == true,
+           tripStore.selectedTicketID != previousSelection {
+            handoffTicketID = tripStore.selectedTicketID
+        } else {
+            handoffTicketID = nil
+        }
+        refreshActivity(handoffTicketID: handoffTicketID)
     }
 
     private func deleteAllTickets() {

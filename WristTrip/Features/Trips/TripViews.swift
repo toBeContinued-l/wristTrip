@@ -101,11 +101,11 @@ struct CurrentTicketCard: View {
                     .buttonStyle(.bordered).accessibilityLabel("预览手表卡片")
                 Spacer(minLength: 0)
             }
-            Text(ticket.syncText).font(.caption2).foregroundStyle(.secondary)
         }
         .padding(15)
         .background(TripPalette.card(for: colorScheme), in: RoundedRectangle(cornerRadius: 8))
     }
+
 }
 
 struct TicketRow: View {
@@ -130,36 +130,35 @@ struct StatusBadge: View {
 
 struct TicketDetailView: View {
     @Environment(\.colorScheme) private var colorScheme
-    let ticket: Ticket
-    @Binding var demoFeedback: String?
+    @State private var displayedTicket: Ticket
     let onSync: () -> Void
-    let onDemo: () -> Void
     let onDelete: () -> Void
     let onUpdate: (Ticket) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingDelete = false
     @State private var showingEditor = false
-    @State private var editingField: TicketEditField?
+    @State private var returnToTripsAfterEdit = false
     @State private var showingProvenance = true
+
+    init(ticket: Ticket, onSync: @escaping () -> Void,
+         onDelete: @escaping () -> Void,
+         onUpdate: @escaping (Ticket) -> Void) {
+        _displayedTicket = State(initialValue: ticket)
+        self.onSync = onSync
+        self.onDelete = onDelete
+        self.onUpdate = onUpdate
+    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Button { editingField = nil; showingEditor = true } label: {
-                    TicketSummaryPanel(ticket: ticket)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("编辑车票信息")
-                Button { editingField = .waitingRoom; showingEditor = true } label: {
-                    TicketOnsitePanel(ticket: ticket)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("编辑候车室和检票口")
+                TicketSummaryPanel(ticket: displayedTicket)
+                TicketOnsitePanel(ticket: displayedTicket)
                 DisclosureGroup("来源与时间", isExpanded: $showingProvenance) {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(ticket.sourceText)
-                        Text("导入于 \(ticket.importedAt.formatted(date: .abbreviated, time: .shortened))")
-                        Text("更新于 \(ticket.updatedAt.formatted(date: .abbreviated, time: .shortened))")
+                        Text(displayedTicket.sourceText)
+                        Text("导入于 \(displayedTicket.importedAt.formatted(date: .abbreviated, time: .shortened))")
+                        Text("更新于 \(displayedTicket.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                         Text("状态依据计划时间推算")
                     }
                     .padding(.top, 5)
@@ -171,20 +170,11 @@ struct TicketDetailView: View {
             .padding(16)
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            HStack(spacing: 10) {
-                Button(action: onSync) {
-                    Label("显示到智能叠放", systemImage: "applewatch.and.arrow.forward")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                Button(action: onDemo) {
-                    Image(systemName: "play.rectangle")
-                        .frame(width: 38, height: 28)
-                }
-                .buttonStyle(.bordered)
-                .accessibilityLabel("启动 15 分钟智能叠放演示")
-                .help("启动 15 分钟智能叠放演示")
+            Button(action: onSync) {
+                Label("显示到智能叠放", systemImage: "applewatch.and.arrow.forward")
+                    .frame(maxWidth: .infinity)
             }
+            .buttonStyle(.borderedProminent)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .background(.bar)
@@ -194,15 +184,22 @@ struct TicketDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                Button { editingField = nil; showingEditor = true } label: { Image(systemName: "square.and.pencil") }
+                Button { showingEditor = true } label: { Image(systemName: "square.and.pencil") }
                     .accessibilityLabel("编辑车票")
                 Button { confirmingDelete = true } label: { Image(systemName: "trash") }
                     .accessibilityLabel("删除车票")
             }
         }
-        .sheet(isPresented: $showingEditor) {
-            TicketEditorView(ticket: ticket, initialFocus: editingField) { updated in
+        .sheet(isPresented: $showingEditor, onDismiss: {
+            if returnToTripsAfterEdit {
+                returnToTripsAfterEdit = false
+                dismiss()
+            }
+        }) {
+            TicketEditorView(ticket: displayedTicket) { updated in
+                displayedTicket = updated
                 onUpdate(updated)
+                returnToTripsAfterEdit = true
                 showingEditor = false
             }
         }
@@ -211,14 +208,6 @@ struct TicketDetailView: View {
             Button("确认删除", role: .destructive) { onDelete(); dismiss() }
         } message: {
             Text("此操作将删除本机保存的这张车票，且无法恢复。")
-        }
-        .alert("智能叠放演示", isPresented: Binding(
-            get: { demoFeedback != nil },
-            set: { if !$0 { demoFeedback = nil } }
-        )) {
-            Button("知道了") { demoFeedback = nil }
-        } message: {
-            Text(demoFeedback ?? "")
         }
     }
 
@@ -322,6 +311,7 @@ struct TicketOnsitePanel: View {
             onsiteValue("候车室", ticket.waitingRoom)
             Divider()
             onsiteValue("检票口", ticket.gate)
+                .padding(.leading, 12)
         }
         .frame(height: 40)
         .padding(.horizontal, 16)
@@ -353,29 +343,23 @@ enum TicketEditField: String, Hashable, Identifiable {
 struct TicketEditorView: View {
     @Environment(\.colorScheme) private var colorScheme
     let ticket: Ticket
-    let initialFocus: TicketEditField?
     let onSave: ((Ticket) -> Void)?
     let onSaveFields: ((TicketEditFields) -> Void)?
     @Environment(\.dismiss) private var dismiss
     @State private var fields: TicketEditFields
     @State private var validationMessage: String?
     @FocusState private var focusedField: TicketEditField?
-    @State private var pickerField: TicketEditField?
-    @State private var pickerValue = Date()
 
-    init(ticket: Ticket, initialFocus: TicketEditField? = nil,
-         initialFields: TicketEditFields? = nil, onSave: @escaping (Ticket) -> Void) {
+    init(ticket: Ticket, onSave: @escaping (Ticket) -> Void) {
         self.ticket = ticket
-        self.initialFocus = initialFocus
         self.onSave = onSave
         self.onSaveFields = nil
-        _fields = State(initialValue: initialFields ?? TicketEditFields(ticket: ticket))
+        _fields = State(initialValue: TicketEditFields(ticket: ticket))
     }
 
     init(ticket: Ticket, initialFields: TicketEditFields,
          onSaveFields: @escaping (TicketEditFields) -> Void) {
         self.ticket = ticket
-        self.initialFocus = nil
         self.onSave = nil
         self.onSaveFields = onSaveFields
         _fields = State(initialValue: initialFields)
@@ -393,9 +377,9 @@ struct TicketEditorView: View {
                             textInput("到达站", $fields.to, "到达站", .to, font: .title3.weight(.semibold))
                                 .multilineTextAlignment(.trailing)
                         }
-                        scheduleInput("出发", day: fields.travelDate, time: fields.departureTime,
+                        scheduleInput("出发", day: $fields.travelDate, time: $fields.departureTime,
                                       dayField: .travelDate, timeField: .departureTime)
-                        scheduleInput("到达", day: fields.arrivalDate, time: fields.arrivalTime,
+                        scheduleInput("到达", day: $fields.arrivalDate, time: $fields.arrivalTime,
                                       dayField: .arrivalDate, timeField: .arrivalTime)
                         HStack(spacing: 6) {
                             textInput("席别", $fields.seatClass, "席别", .seatClass)
@@ -407,8 +391,7 @@ struct TicketEditorView: View {
                         Divider()
                         HStack(alignment: .firstTextBaseline, spacing: 12) {
                             labeledInput("订单号", $fields.orderNumber, "待补充", .orderNumber)
-                            labeledInput("票价", $fields.fare, "待补充", .fare)
-                                .multilineTextAlignment(.trailing)
+                            currencyInput
                                 .frame(width: 90)
                         }
                     }
@@ -434,39 +417,39 @@ struct TicketEditorView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) { Button("保存") { save() }.fontWeight(.semibold) }
             }
-            .onAppear { applyInitialFocus() }
-            .task {
-                try? await Task.sleep(for: .milliseconds(250))
-                applyInitialFocus()
-            }
-            .sheet(item: $pickerField) { field in
-                NavigationStack {
-                    Group {
-                        if field == .travelDate || field == .arrivalDate {
-                            DatePicker("选择日期", selection: $pickerValue, displayedComponents: .date)
-                                .datePickerStyle(.graphical)
-                        } else {
-                            DatePicker("选择时间", selection: $pickerValue, displayedComponents: .hourAndMinute)
-                                .datePickerStyle(.wheel)
-                        }
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button { moveFocus(-1) } label: {
+                        Image(systemName: "chevron.left")
                     }
-                    .padding()
-                    .environment(\.timeZone, ticket.displayTimezone)
-                    .navigationTitle(field == .travelDate || field == .arrivalDate ? "选择日期" : "选择时间")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) { Button("取消") { pickerField = nil } }
-                        ToolbarItem(placement: .confirmationAction) { Button("完成") { applyPicker(field) } }
+                    .accessibilityLabel("上一个输入框")
+                    Button { moveFocus(1) } label: {
+                        Image(systemName: "chevron.right")
                     }
+                    .accessibilityLabel("下一个输入框")
                 }
-                .presentationDetents([.medium])
             }
         }
     }
 
-    private func applyInitialFocus() {
-        guard let initialFocus else { return }
-        focusedField = initialFocus
+    private var focusOrder: [TicketEditField] {
+        [.train, .from, .to, .travelDate, .departureTime, .arrivalDate, .arrivalTime,
+         .seatClass, .carriage, .seat, .orderNumber, .fare, .waitingRoom, .gate]
+    }
+
+    private func moveFocus(_ offset: Int) {
+        guard let focusedField,
+              let index = focusOrder.firstIndex(of: focusedField) else {
+            self.focusedField = focusOrder.first
+            return
+        }
+        let nextIndex = index + offset
+        guard focusOrder.indices.contains(nextIndex) else {
+            self.focusedField = nil
+            return
+        }
+        self.focusedField = focusOrder[nextIndex]
     }
 
     private func textInput(_ label: String, _ text: Binding<String>, _ prompt: String,
@@ -488,48 +471,143 @@ struct TicketEditorView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func scheduleInput(_ label: String, day: String, time: String,
+    private func scheduleInput(_ label: String, day: Binding<String>, time: Binding<String>,
                                dayField: TicketEditField, timeField: TicketEditField) -> some View {
-        HStack(spacing: 10) {
+        let hasAnyValue = !day.wrappedValue.isEmpty || !time.wrappedValue.isEmpty
+        return HStack(spacing: 10) {
             Text(label).foregroundStyle(.secondary).frame(width: 32, alignment: .leading)
-            Button(day.isEmpty ? "选择日期" : day) { openPicker(dayField, day: day, time: time) }
-            Button(time.isEmpty ? "选择时间" : time) { openPicker(timeField, day: day, time: time) }
-                .monospacedDigit()
+            scheduleTextInput(day, placeholder: "如 20261008", field: dayField, kind: .date,
+                              required: hasAnyValue)
+            scheduleTextInput(time, placeholder: "如 0842", field: timeField, kind: .time,
+                              required: hasAnyValue)
             Spacer(minLength: 0)
         }
         .font(.subheadline)
-        .buttonStyle(.plain)
-        .tint(.indigo)
     }
 
-    private func openPicker(_ field: TicketEditField, day: String, time: String) {
-        focusedField = nil
-        let formatter = DateFormatter()
-        formatter.timeZone = ticket.displayTimezone
-        formatter.dateFormat = "yyyy-MM-dd"
-        let selectedDay = day.isEmpty ? formatter.string(from: Date()) : day
-        pickerValue = Ticket.scheduleDate(day: selectedDay, time: time.isEmpty ? "12:00" : time,
-                                          timezone: ticket.displayTimezone) ?? Date()
-        pickerField = field
+    private func scheduleTextInput(_ value: Binding<String>, placeholder: String,
+                                   field: TicketEditField, kind: ScheduleInputKind,
+                                   required: Bool) -> some View {
+        TextField(placeholder, text: formattedBinding(value, kind: kind))
+            .keyboardType(.numberPad)
+            .monospacedDigit()
+            .focused($focusedField, equals: field)
+            .textFieldStyle(.roundedBorder)
+            .foregroundStyle(scheduleValidationTextColor(value.wrappedValue, kind: kind, required: required))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(scheduleValidationBorderColor(value.wrappedValue, kind: kind, required: required), lineWidth: 1)
+                    .allowsHitTesting(false)
+            }
+            .frame(maxWidth: .infinity)
+            .accessibilityLabel(field == .travelDate || field == .arrivalDate ? "日期" : "时间")
+            .accessibilityHint(scheduleValidationHint(value.wrappedValue, kind: kind, required: required))
     }
 
-    private func applyPicker(_ field: TicketEditField) {
-        let formatter = DateFormatter()
-        formatter.timeZone = ticket.displayTimezone
-        switch field {
-        case .travelDate, .arrivalDate: formatter.dateFormat = "yyyy-MM-dd"
-        case .departureTime, .arrivalTime: formatter.dateFormat = "HH:mm"
-        default: return
+    private func scheduleValidationColor(_ value: String, kind: ScheduleInputKind,
+                                         required: Bool) -> Color {
+        switch scheduleValidationState(value, kind: kind, required: required) {
+        case .valid: return .clear
+        case .incomplete: return .orange
+        case .invalid: return .red
         }
-        let value = formatter.string(from: pickerValue)
-        switch field {
-        case .travelDate: fields.travelDate = value
-        case .arrivalDate: fields.arrivalDate = value
-        case .departureTime: fields.departureTime = value
-        case .arrivalTime: fields.arrivalTime = value
-        default: break
+    }
+
+    private func scheduleValidationTextColor(_ value: String, kind: ScheduleInputKind,
+                                             required: Bool) -> Color {
+        switch scheduleValidationState(value, kind: kind, required: required) {
+        case .valid: return .primary
+        case .incomplete: return .orange
+        case .invalid: return .red
         }
-        pickerField = nil
+    }
+
+    private func scheduleValidationBorderColor(_ value: String, kind: ScheduleInputKind,
+                                               required: Bool) -> Color {
+        scheduleValidationColor(value, kind: kind, required: required)
+    }
+
+    private func scheduleValidationState(_ value: String, kind: ScheduleInputKind,
+                                         required: Bool) -> ScheduleValidation {
+        let digits = value.filter(\.isNumber)
+        guard !digits.isEmpty else { return required ? .incomplete : .valid }
+        let limit = kind == .date ? 8 : 4
+        guard digits.count == limit else { return .incomplete }
+        let valid: Bool
+        switch kind {
+        case .date:
+            valid = Ticket.scheduleDate(day: value, time: "00:00", timezone: ticket.displayTimezone) != nil
+        case .time:
+            valid = Ticket.scheduleDate(day: "2000-01-01", time: value,
+                                        timezone: ticket.displayTimezone) != nil
+        }
+        return valid ? .valid : .invalid
+    }
+
+    private func scheduleValidationHint(_ value: String, kind: ScheduleInputKind,
+                                        required: Bool) -> String {
+        switch scheduleValidationState(value, kind: kind, required: required) {
+        case .incomplete: return "请输入完整的\(kind == .date ? "八位日期" : "四位时间")"
+        case .invalid: return "输入的\(kind == .date ? "日期" : "时间")不存在"
+        case .valid: return ""
+        }
+    }
+
+    private var currencyInput: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("票价").font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 2) {
+                Text("¥").foregroundStyle(.secondary)
+                TextField("金额", text: fareAmountBinding)
+                    .keyboardType(.decimalPad)
+                    .multilineTextAlignment(.trailing)
+                    .monospacedDigit()
+                    .focused($focusedField, equals: .fare)
+            }
+        }
+    }
+
+    private var fareAmountBinding: Binding<String> {
+        Binding(
+            get: { Self.numericFare(fields.fare) },
+            set: { fields.fare = $0.isEmpty ? "" : "¥\(Self.numericFare($0))" }
+        )
+    }
+
+    private func formattedBinding(_ source: Binding<String>, kind: ScheduleInputKind) -> Binding<String> {
+        Binding(
+            get: { Self.scheduleText(source.wrappedValue, kind: kind) },
+            set: { source.wrappedValue = Self.scheduleText($0, kind: kind) }
+        )
+    }
+
+    private static func scheduleText(_ value: String, kind: ScheduleInputKind) -> String {
+        let digits = value.filter(\.isNumber)
+        let limit = kind == .date ? 8 : 4
+        let clipped = String(digits.prefix(limit))
+        switch kind {
+        case .date:
+            if clipped.count <= 4 { return clipped }
+            if clipped.count <= 6 { return "\(clipped.prefix(4))-\(clipped.dropFirst(4))" }
+            return "\(clipped.prefix(4))-\(clipped.dropFirst(4).prefix(2))-\(clipped.dropFirst(6))"
+        case .time:
+            if clipped.count <= 2 { return clipped }
+            return "\(clipped.prefix(2)):\(clipped.dropFirst(2))"
+        }
+    }
+
+    private static func numericFare(_ value: String) -> String {
+        var result = ""
+        var hasDecimal = false
+        for character in value {
+            if character.isNumber {
+                result.append(character)
+            } else if (character == "." || character == ",") && !hasDecimal {
+                result.append(".")
+                hasDecimal = true
+            }
+        }
+        return result
     }
 
     private func save() {
@@ -537,12 +615,40 @@ struct TicketEditorView: View {
             onSaveFields(fields)
             return
         }
-        switch fields.updatedTicket(from: ticket) {
-        case .success(let updated): onSave?(updated)
-        case .failure(let error): validationMessage = error.localizedDescription
+        guard let missingMessage = missingRequiredFieldMessage() else {
+            switch fields.updatedTicket(from: ticket) {
+            case .success(let updated): onSave?(updated)
+            case .failure(let error): validationMessage = error.localizedDescription
+            }
+            return
         }
+        validationMessage = missingMessage
+    }
+
+    private func missingRequiredFieldMessage() -> String? {
+        let required: [(String, String)] = [
+            ("车次", fields.train), ("出发站", fields.from), ("到达站", fields.to),
+            ("车厢", fields.carriage), ("座位", fields.seat)
+        ]
+        if let missing = required.first(where: { trimmed($0.1).isEmpty }) {
+            return "请填写\(missing.0)"
+        }
+        if trimmed(fields.travelDate).isEmpty || trimmed(fields.departureTime).isEmpty {
+            return "请填写完整的出发日期和时间"
+        }
+        if trimmed(fields.arrivalDate).isEmpty || trimmed(fields.arrivalTime).isEmpty {
+            return "请填写完整的到站日期和时间"
+        }
+        return nil
+    }
+
+    private func trimmed(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
+
+private enum ScheduleInputKind { case date, time }
+private enum ScheduleValidation { case valid, incomplete, invalid }
 
 struct TicketEditFields {
     var train: String
@@ -617,8 +723,6 @@ struct TicketEditFields {
         set("gate", original.gate == "待公布" ? "" : original.gate, gate) {
             $0.gate = $1.isEmpty ? "待公布" : $1
             $0.normalizedGates = Ticket.normalizeGates($0.gate)
-            $0.gateQueriedAt = nil
-            $0.gateQueryRawResponse = nil
         }
         guard changed || start != original.plannedDepartureAt || end != original.plannedArrivalAt else {
             return .success(original)

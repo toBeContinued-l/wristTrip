@@ -397,7 +397,7 @@ final class TicketImportAndEditTests: XCTestCase {
         XCTAssertEqual(store.duplicate(of: legacy)?.id, existing.id)
     }
 
-    func testLegacyStoredTicketDecodesWithoutOrderNumber() throws {
+    func testLegacyStoredTicketDecodesAndIgnoresRemovedReminderFields() throws {
         let ticket = Ticket(id: UUID(), train: "G1", date: "2026-10-08", departTime: "08:00",
                             arriveTime: "09:00", from: "北京南", to: "天津南", carriage: "01车",
                             seat: "01A", waitingRoom: "待公布", gate: "待公布", status: .upcoming,
@@ -405,8 +405,77 @@ final class TicketImportAndEditTests: XCTestCase {
         let encoded = try JSONEncoder().encode(ticket)
         var object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         object.removeValue(forKey: "orderNumber")
+        object["activityLeadHours"] = 5
+        object["activityReminderEnabled"] = true
         let legacy = try JSONSerialization.data(withJSONObject: object)
-        XCTAssertEqual(try JSONDecoder().decode(Ticket.self, from: legacy).orderNumber, "")
+        let decoded = try JSONDecoder().decode(Ticket.self, from: legacy)
+        XCTAssertEqual(decoded.orderNumber, "")
+        let roundTrip = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(decoded)) as? [String: Any])
+        XCTAssertNil(roundTrip["activityLeadHours"])
+        XCTAssertNil(roundTrip["activityReminderEnabled"])
+    }
+
+    func testActivityWindowUsesFixedThreeHourDefault() {
+        let departure = Ticket.scheduleDate(day: "2026-10-09", time: "22:05")!
+        let arrival = Ticket.scheduleDate(day: "2026-10-09", time: "22:26")!
+        let ticket = Ticket(id: UUID(), train: "G8903", date: "2026-10-09", departTime: "22:05",
+                            arriveTime: "22:26", from: "北京南", to: "廊坊", carriage: "11车",
+                            seat: "01C", waitingRoom: "待公布", gate: "13A、13B", status: .upcoming,
+                            syncText: "", plannedDepartureAt: departure, plannedArrivalAt: arrival)
+        let fiveHoursBefore = departure.addingTimeInterval(-5 * 60 * 60)
+        let threeHoursBefore = departure.addingTimeInterval(-3 * 60 * 60)
+
+        XCTAssertEqual(ticket.startAt, threeHoursBefore)
+        XCTAssertNil(TripActivityService.ticketForActivity(tickets: [ticket], selectedTicketID: ticket.id,
+                                                             now: fiveHoursBefore))
+        XCTAssertEqual(ticket.startAt, threeHoursBefore)
+        XCTAssertEqual(TripActivityService.ticketForActivity(tickets: [ticket], selectedTicketID: ticket.id,
+                                                               requestedTicketID: ticket.id,
+                                                               now: fiveHoursBefore)?.id, ticket.id)
+        XCTAssertEqual(TripActivityService.ticketForActivity(tickets: [ticket], selectedTicketID: ticket.id,
+                                                               manualActivityTicketID: ticket.id,
+                                                               manualActivityStartedAt: fiveHoursBefore,
+                                                               now: fiveHoursBefore)?.id, ticket.id)
+
+        let eligibleDeparture = departure.addingTimeInterval(-2 * 60 * 60)
+        let eligible = Ticket(id: UUID(), train: "G8902", date: "2026-10-09", departTime: "20:05",
+                              arriveTime: "20:26", from: "北京南", to: "廊坊", carriage: "11车",
+                              seat: "02C", waitingRoom: "待公布", gate: "13A、13B", status: .upcoming,
+                              syncText: "", plannedDepartureAt: eligibleDeparture,
+                              plannedArrivalAt: departure.addingTimeInterval(-90 * 60))
+        XCTAssertEqual(TripActivityService.ticketForActivity(tickets: [eligible, ticket],
+                                                               selectedTicketID: eligible.id,
+                                                               requestedTicketID: ticket.id,
+                                                               now: fiveHoursBefore)?.id, ticket.id)
+
+        let longArrival = departure.addingTimeInterval(12 * 60 * 60)
+        let longTicket = Ticket(id: UUID(), train: "G8904", date: "2026-10-09", departTime: "22:05",
+                                arriveTime: "10:05", from: "北京南", to: "上海虹桥", carriage: "11车",
+                                seat: "03C", waitingRoom: "待公布", gate: "13A", status: .upcoming,
+                                syncText: "", plannedDepartureAt: departure, plannedArrivalAt: longArrival)
+        let afterManualLimit = fiveHoursBefore.addingTimeInterval(8 * 60 * 60)
+        XCTAssertNil(TripActivityService.ticketForActivity(tickets: [longTicket],
+                                                             selectedTicketID: longTicket.id,
+                                                             manualActivityTicketID: longTicket.id,
+                                                             manualActivityStartedAt: fiveHoursBefore,
+                                                             now: afterManualLimit))
+        XCTAssertNil(TripActivityService.manualActivityEndReason(startedAt: fiveHoursBefore,
+                                                                  arrivalAt: longArrival,
+                                                                  now: afterManualLimit.addingTimeInterval(-1)))
+        XCTAssertEqual(TripActivityService.manualActivityEndReason(startedAt: fiveHoursBefore,
+                                                                    arrivalAt: longArrival,
+                                                                    now: afterManualLimit), .timeLimitReached)
+        XCTAssertNil(TripActivityService.manualActivityEndReason(startedAt: afterManualLimit,
+                                                                  arrivalAt: longArrival,
+                                                                  now: afterManualLimit))
+        XCTAssertEqual(TripActivityService.ticketForActivity(tickets: [longTicket],
+                                                               selectedTicketID: longTicket.id,
+                                                               manualActivityTicketID: longTicket.id,
+                                                               manualActivityStartedAt: afterManualLimit,
+                                                               now: afterManualLimit)?.id, longTicket.id)
+        XCTAssertEqual(TripActivityService.manualActivityEndReason(startedAt: fiveHoursBefore,
+                                                                    arrivalAt: afterManualLimit,
+                                                                    now: afterManualLimit), .arrived)
     }
 
     @MainActor
@@ -437,9 +506,161 @@ final class TicketImportAndEditTests: XCTestCase {
         store.refreshStatuses(at: arrivalA)
         XCTAssertEqual(store.tickets.first { $0.id == first.id }?.status, .arrived)
         XCTAssertEqual(TripStore(defaults: defaults).tickets.first { $0.id == first.id }?.status, .arrived)
+        XCTAssertEqual(store.selectedTicketID, second.id)
+        XCTAssertEqual(TripStore(defaults: defaults).selectedTicketID, second.id)
         XCTAssertEqual(store.currentTicket(at: arrivalA)?.id, second.id)
         XCTAssertEqual(TripActivityService.ticketForActivity(tickets: store.tickets, selectedTicketID: first.id,
                                                                now: arrivalA)?.id, second.id)
+    }
+
+    @MainActor
+    func testBackgroundRefreshPersistsEveryBoundaryBeforeUpdatingDisplays() async throws {
+        let suite = UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let departure = Ticket.scheduleDate(day: "2026-10-09", time: "08:00")!
+        let arrival = departure.addingTimeInterval(60 * 60)
+        let first = scheduledTicket(departure: departure, arrival: arrival)
+        let next = scheduledTicket(departure: arrival.addingTimeInterval(20 * 60),
+                                   arrival: arrival.addingTimeInterval(60 * 60))
+        let store = TripStore(defaults: defaults)
+        store.add(first)
+        store.add(next)
+        store.selectForWatch(id: first.id)
+
+        for (now, expected) in [(first.startAt!, TicketStatus.upcoming),
+                                (departure.addingTimeInterval(-2 * 60 * 60), .upcoming),
+                                (departure.addingTimeInterval(-60 * 60), .upcoming),
+                                (departure.addingTimeInterval(-30 * 60), .boarding),
+                                (departure, .onboard),
+                                (departure.addingTimeInterval(30 * 60), .onboard),
+                                (arrival, .arrived)] {
+            var activityCalled = false
+            var watchCalled = false
+            let success = await TripBackgroundRefreshService.refresh(now: now, defaults: defaults) { tickets, selectedID, instant, enabled in
+                activityCalled = true
+                XCTAssertEqual(instant, now)
+                XCTAssertTrue(enabled)
+                XCTAssertEqual(tickets.first { $0.id == first.id }?.status, expected)
+                let persisted = TripStore(defaults: defaults)
+                XCTAssertEqual(persisted.tickets.first { $0.id == first.id }?.status, expected)
+                let chosen = TripActivityService.ticketForActivity(tickets: tickets, selectedTicketID: selectedID, now: now)
+                XCTAssertEqual(chosen?.id, now == arrival ? next.id : first.id)
+            } syncWatch: { tickets, selectedID in
+                watchCalled = true
+                XCTAssertEqual(tickets.first { $0.id == first.id }?.status, expected)
+                if now == arrival { XCTAssertEqual(selectedID, next.id) }
+                return true
+            }
+            XCTAssertTrue(success)
+            XCTAssertTrue(activityCalled)
+            XCTAssertTrue(watchCalled)
+        }
+    }
+
+    @MainActor
+    func testBackgroundRefreshHonorsSwitchAndSyncsAfterActivityFailure() async {
+        let suite = UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(false, forKey: "wristTrip.liveActivitiesEnabled")
+        let departure = Ticket.scheduleDate(day: "2026-10-09", time: "08:00")!
+        let arrival = departure.addingTimeInterval(60 * 60)
+        TripStore(defaults: defaults).add(scheduledTicket(departure: departure, arrival: arrival))
+        var queued = false
+        let success = await TripBackgroundRefreshService.refresh(now: arrival, defaults: defaults) { _, _, _, enabled in
+            XCTAssertFalse(enabled)
+            throw NSError(domain: "ActivityRefreshTest", code: 1)
+        } syncWatch: { tickets, _ in
+            queued = true
+            XCTAssertEqual(tickets.first?.status, .arrived)
+            return true
+        }
+        XCTAssertFalse(success)
+        XCTAssertTrue(queued)
+        XCTAssertEqual(TripStore(defaults: defaults).tickets.first?.status, .arrived)
+    }
+
+    @MainActor
+    func testDelayedArrivalRefreshClearsSelectionAndPublishesArrivedTicket() async {
+        let suite = UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let departure = Ticket.scheduleDate(day: "2026-10-09", time: "08:00")!
+        let arrival = departure.addingTimeInterval(60 * 60)
+        let ticket = scheduledTicket(departure: departure, arrival: arrival)
+        let store = TripStore(defaults: defaults)
+        store.add(ticket)
+        store.selectForWatch(id: ticket.id)
+        let lateWake = arrival.addingTimeInterval(20 * 60)
+
+        let success = await TripBackgroundRefreshService.refresh(now: lateWake, defaults: defaults) { tickets, selectedID, _, enabled in
+            XCTAssertTrue(enabled)
+            XCTAssertEqual(tickets.first?.status, .arrived)
+            XCTAssertNil(selectedID)
+            XCTAssertNil(TripActivityService.ticketForActivity(tickets: tickets, selectedTicketID: selectedID, now: lateWake))
+        } syncWatch: { tickets, selectedID in
+            XCTAssertEqual(tickets.first?.status, .arrived)
+            XCTAssertNil(selectedID)
+            return true
+        }
+
+        XCTAssertTrue(success)
+        XCTAssertEqual(TripStore(defaults: defaults).tickets.first?.status, .arrived)
+        XCTAssertNil(TripStore(defaults: defaults).selectedTicketID)
+        XCTAssertEqual(TripBackgroundRefreshService.nextRequestDate(tickets: [ticket], after: lateWake,
+                                                                    retryAfterFailure: true),
+                       lateWake.addingTimeInterval(15 * 60))
+    }
+
+    @MainActor
+    func testRefreshBoundariesAdvanceThroughWindowDepartureAndArrival() {
+        let departure = Ticket.scheduleDate(day: "2026-10-09", time: "08:00")!
+        let arrival = departure.addingTimeInterval(60 * 60)
+        let ticket = scheduledTicket(departure: departure, arrival: arrival)
+        let start = ticket.startAt!
+        let twoHoursBefore = departure.addingTimeInterval(-2 * 60 * 60)
+        let oneHourBefore = departure.addingTimeInterval(-60 * 60)
+        let boarding = departure.addingTimeInterval(-30 * 60)
+        XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [ticket], after: start.addingTimeInterval(-1)), start)
+        XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [ticket], after: start), twoHoursBefore)
+        XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [ticket], after: twoHoursBefore), oneHourBefore)
+        XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [ticket], after: oneHourBefore), boarding)
+        XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [ticket], after: boarding), departure)
+        XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [ticket], after: departure), arrival)
+        XCTAssertNil(TripBackgroundRefreshService.nextBoundary(tickets: [ticket], after: arrival))
+        let longArrival = departure.addingTimeInterval(12 * 60 * 60)
+        let longTicket = scheduledTicket(departure: departure, arrival: longArrival)
+        XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [longTicket], after: departure),
+                       departure.addingTimeInterval(8 * 60 * 60))
+        let edited = scheduledTicket(departure: departure.addingTimeInterval(60 * 60), arrival: arrival.addingTimeInterval(60 * 60))
+        XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [edited], after: departure),
+                       edited.plannedDepartureAt?.addingTimeInterval(-30 * 60))
+    }
+
+    @MainActor
+    func testArrivalClearsWatchSelectionWhenThereIsNoNextJourney() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let store = TripStore(defaults: defaults)
+        let departure = Ticket.scheduleDate(day: "2026-10-09", time: "08:00")!
+        let arrival = Ticket.scheduleDate(day: "2026-10-09", time: "09:00")!
+        let ticket = scheduledTicket(departure: departure, arrival: arrival)
+        store.add(ticket)
+        store.selectForWatch(id: ticket.id)
+
+        XCTAssertTrue(store.refreshStatuses(at: arrival))
+        XCTAssertEqual(store.tickets.first?.status, .arrived)
+        XCTAssertNil(store.selectedTicketID)
+
+        let persisted = TripStore(defaults: defaults)
+        XCTAssertEqual(persisted.tickets.first?.status, .arrived)
+        XCTAssertNil(persisted.selectedTicketID)
+    }
+
+    private func scheduledTicket(departure: Date, arrival: Date) -> Ticket {
+        Ticket(id: UUID(), train: "G1", date: "2026-10-09", departTime: "08:00", arriveTime: "09:00",
+               from: "北京南", to: "天津南", carriage: "01车", seat: "01A", waitingRoom: "待公布",
+               gate: "待公布", status: .upcoming, syncText: "", plannedDepartureAt: departure, plannedArrivalAt: arrival)
     }
 
     private func line(_ text: String, _ x: CGFloat, _ y: CGFloat) -> OCRLine {
