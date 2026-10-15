@@ -49,18 +49,16 @@ enum TripBackgroundRefreshService {
         logger.info("Background refresh started")
         // Keep the next boundary queued even if this task expires while updating displays.
         schedule()
+        let completion = RefreshTaskCompletion(task: task)
         let work = Task { @MainActor in
             let success = await refresh(performActivityHandoff: true)
-            let completed = success && !Task.isCancelled
-            schedule(retryAfterFailure: !completed)
-            logger.info("Background refresh completed: \(completed)")
-            task.setTaskCompleted(success: completed)
+            completion.finish(success: success && !Task.isCancelled)
         }
         task.expirationHandler = {
             work.cancel()
             Task { @MainActor in
                 logger.error("Background refresh expired")
-                schedule(retryAfterFailure: true)
+                completion.finish(success: false)
             }
         }
     }
@@ -155,5 +153,22 @@ enum TripBackgroundRefreshService {
         let automaticDeadline = TripActivityService.nextAutomaticActivityDeadline
         return (boundaries + [manualDeadline, automaticDeadline].compactMap { $0 })
             .filter { $0 > now }.min()
+    }
+}
+
+@MainActor
+private final class RefreshTaskCompletion {
+    private let task: BGAppRefreshTask
+    private var finished = false
+
+    init(task: BGAppRefreshTask) {
+        self.task = task
+    }
+
+    func finish(success: Bool) {
+        guard !finished else { return }
+        finished = true
+        TripBackgroundRefreshService.schedule(retryAfterFailure: !success)
+        task.setTaskCompleted(success: success)
     }
 }

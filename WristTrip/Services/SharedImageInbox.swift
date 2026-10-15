@@ -1,7 +1,7 @@
 import Foundation
 
 enum SharedImageInbox {
-    static let groupIdentifier = "group.com.clenson.wristtrip.jm6fwtk9kj"
+    static let groupIdentifier = "group.com.clenson.wristrail"
 
     enum InboxError: LocalizedError {
         case unavailable
