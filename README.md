@@ -8,12 +8,16 @@
 - 核对、编辑、保存多张车票，并根据计划发车和到站时间显示行程状态。
 - 手动启动实时活动；已安装 Watch App 时可同步离线车票快照。
 - 提供自动展示的客户端设置和推送令牌登记逻辑。定时启动、更新及结束需要另行部署 APNs 调度服务。
+- 使用 `BGAppRefreshTask` 请求发车前 3 小时、2 小时、1 小时、30 分钟、计划发车、计划到站和 8 小时续期边界；这些是系统的最早执行时间，不是精确闹钟。
+- iPhone、Live Activity 和 Watch 共用计划状态规则。后台任务先持久化状态，再更新 ActivityKit 和 WatchConnectivity 离线快照；到站车票保留在历史记录中。
 
 ## 运行与测试
 
 使用 Xcode 16 或更新版本打开 `WristTrip.xcodeproj`，选择 `WristTrip` scheme 和 iOS 18 或更新版本的 iPhone 模拟器运行。watchOS App 的最低版本为 watchOS 11。回归测试位于 `WristTripTests` scheme，需要可用的 iOS 模拟器运行时。
 
 真机运行需要在 Xcode 中为各 target 配置自己的开发团队、Bundle Identifier 和 App Group，并保持 Watch App 的 companion 标识与 iPhone App 一致。推送功能还需要相应的 Apple Developer 能力和服务端；仓库不包含 APNs 服务端、生产地址或推送凭据。未配置服务端时，应用会显示“自动服务尚未配置”。
+
+当前工程的默认配置为：iPhone `com.clenson.wristrail`、Widget `com.clenson.wristrail.widget`、Watch App `com.clenson.wristrail.watchkitapp`，开发团队为工程中的 `DEVELOPMENT_TEAM`。iPhone 与分享扩展共用 `group.com.clenson.wristrail`；Watch 使用 WatchConnectivity 离线传输，不直接依赖该 App Group。提交真机前仍需在开发者账号中为这些 Bundle ID、ActivityKit、Background Modes 和相同团队重新生成有效签名配置。
 
 ## 隐私与限制
 

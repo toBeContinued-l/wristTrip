@@ -121,9 +121,12 @@ final class TripStore: ObservableObject {
 
     private static func nextWatchTicketID(in tickets: [Ticket], at now: Date) -> UUID? {
         let eligible = tickets.filter { ticket in
-            guard ticket.status(at: now) != .arrived else { return false }
-            guard !ticket.isDraft else { return false }
-            return ticket.plannedDepartureAt != nil
+            guard ticket.isValidJourney, let start = ticket.startAt,
+                  let arrival = ticket.plannedArrivalAt else { return false }
+            // Arrival handoff is automatic only inside the three-hour
+            // display window. A farther future journey must not overwrite a
+            // cleared Watch selection before its own window begins.
+            return start <= now && now < arrival
         }
         let active = eligible.filter { ticket in
             guard let departure = ticket.plannedDepartureAt else { return false }

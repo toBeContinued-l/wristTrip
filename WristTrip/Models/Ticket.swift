@@ -7,11 +7,9 @@ enum TicketStatus: String, Codable {
     case arrived = "已到站"
 
     static func forSchedule(departure: Date?, arrival: Date?, now: Date = Date(), boardingWindow: TimeInterval = 30 * 60) -> TicketStatus {
-        guard let departure else { return .upcoming }
-        if now < departure.addingTimeInterval(-boardingWindow) { return .upcoming }
-        if now < departure { return .boarding }
-        guard let arrival else { return .onboard }
-        return now < arrival ? .onboard : .arrived
+        let status = TripScheduleRules.status(departure: departure, arrival: arrival, now: now,
+                                              boardingWindow: boardingWindow)
+        return TicketStatus(rawValue: status.rawValue) ?? .upcoming
     }
 }
 
@@ -144,8 +142,15 @@ struct Ticket: Identifiable, Codable {
         status = status(at: now)
     }
 
-    var startAt: Date? { plannedDepartureAt?.addingTimeInterval(-3 * 60 * 60) }
+    var startAt: Date? { plannedDepartureAt.map(TripScheduleRules.automaticStart(departure:)) }
     var endAt: Date? { plannedArrivalAt }
+
+    /// A ticket can be shown automatically only when all five schedule fields
+    /// required by the background flow are present and internally consistent.
+    var isValidJourney: Bool {
+        TripScheduleRules.isValidJourney(train: train, origin: from, destination: to,
+                                         departure: plannedDepartureAt, arrival: plannedArrivalAt)
+    }
 
     var isDraft: Bool {
         train.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || plannedDepartureAt == nil || from.isEmpty || to.isEmpty

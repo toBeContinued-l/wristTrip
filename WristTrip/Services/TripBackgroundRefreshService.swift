@@ -7,60 +7,107 @@ import OSLog
 @MainActor
 enum TripBackgroundRefreshService {
     static let taskIdentifier = "com.clenson.WristTrip.refresh"
-    private static let logger = Logger(subsystem: "com.clenson.WristTrip", category: "BackgroundRefresh")
+    static let logger = Logger(subsystem: "com.clenson.WristTrip", category: "BackgroundRefresh")
     private static var submittedRequestDate: Date?
     private static var hasReconciledScheduler = false
+    private static var hasRegistered = false
     private static let retryDelay: TimeInterval = 15 * 60
+    private static let maximumConsecutiveRetries = 3
+    private static let retryCountKey = "wristTrip.backgroundRefreshRetryCount"
 
     static func register() {
+        guard !hasRegistered else {
+            logger.debug("[BG] registration already completed")
+            return
+        }
         let registered = BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: nil) { task in
             guard let refreshTask = task as? BGAppRefreshTask else {
+                logger.error("[BG] received unexpected task type: \(String(describing: type(of: task)), privacy: .public)")
                 task.setTaskCompleted(success: false)
                 return
             }
             Task { @MainActor in run(refreshTask) }
         }
-        if !registered { logger.error("Background refresh registration failed") }
+        hasRegistered = registered
+        if registered {
+            logger.info("[BG] registration succeeded for \(taskIdentifier, privacy: .public)")
+        } else {
+            logger.error("[BG] registration failed for \(taskIdentifier, privacy: .public)")
+        }
     }
 
     static func schedule(tickets: [Ticket]? = nil, now: Date = Date(), retryAfterFailure: Bool = false) {
-        let requestDate = nextRequestDate(tickets: tickets ?? TripStore().tickets, after: now,
+        let consecutiveFailures = retryAfterFailure
+            ? UserDefaults.standard.integer(forKey: retryCountKey) + 1
+            : UserDefaults.standard.integer(forKey: retryCountKey)
+        if retryAfterFailure { UserDefaults.standard.set(consecutiveFailures, forKey: retryCountKey) }
+        let sourceTickets = tickets ?? TripStore().tickets
+        let requestDate = nextRequestDate(tickets: sourceTickets, after: now,
                                           manualDeadline: TripActivityService.nextManualActivityDeadline,
-                                          retryAfterFailure: retryAfterFailure)
-        guard !hasReconciledScheduler || requestDate != submittedRequestDate else { return }
+                                          retryAfterFailure: retryAfterFailure && consecutiveFailures <= maximumConsecutiveRetries)
+        if retryAfterFailure && consecutiveFailures > maximumConsecutiveRetries {
+            logger.error("[BG] retry limit reached; waiting for next journey boundary or app launch")
+        }
+        logger.info("[BG] reconcile schedule now=\(now, privacy: .public) tickets=\(sourceTickets.count) retry=\(retryAfterFailure) next=\(String(describing: requestDate), privacy: .public) submitted=\(String(describing: submittedRequestDate), privacy: .public)")
+        guard !hasReconciledScheduler || requestDate != submittedRequestDate else {
+            logger.debug("[BG] skipped duplicate request")
+            return
+        }
         // Replace the request only when an edit changes its next boundary.
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: taskIdentifier)
+        logger.debug("[BG] cancelled previous request before reconciliation")
         hasReconciledScheduler = true
         submittedRequestDate = nil
-        guard let requestDate else { return }
+        guard let requestDate else {
+            logger.info("[BG] no future boundary; no request submitted")
+            return
+        }
         let request = BGAppRefreshTaskRequest(identifier: taskIdentifier)
         request.earliestBeginDate = requestDate
         do {
             try BGTaskScheduler.shared.submit(request)
             submittedRequestDate = requestDate
-            logger.info("Next refresh requested after \(requestDate, privacy: .public)")
+            logger.info("[BG] request submitted earliestBeginDate=\(requestDate, privacy: .public)")
+            logPendingRequests()
         } catch {
-            logger.error("Background refresh scheduling failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("[BG] scheduling failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Pending requests are diagnostic only. Their presence means iOS accepted
+    /// the request; it does not mean the task will run at earliestBeginDate.
+    private static func logPendingRequests() {
+        let identifier = taskIdentifier
+        BGTaskScheduler.shared.getPendingTaskRequests { requests in
+            let matching = requests.filter { $0.identifier == identifier }
+            let dates = matching.map { String(describing: $0.earliestBeginDate) }.joined(separator: ",")
+            Task { @MainActor in
+                logger.info("[BG] pending requests count=\(matching.count) earliest=\(dates, privacy: .public)")
+            }
         }
     }
 
     private static func run(_ task: BGAppRefreshTask) {
         submittedRequestDate = nil
-        logger.info("Background refresh started")
-        // Keep the next boundary queued even if this task expires while updating displays.
-        schedule()
+        let startedAt = Date()
+        logger.info("[BG] task started at \(startedAt, privacy: .public)")
         let completion = RefreshTaskCompletion(task: task)
         let work = Task { @MainActor in
             let success = await refresh(performActivityHandoff: true)
+            logger.info("[BG] task work finished success=\(success) elapsed=\(Date().timeIntervalSince(startedAt), privacy: .public)s")
             completion.finish(success: success && !Task.isCancelled)
         }
         task.expirationHandler = {
             work.cancel()
             Task { @MainActor in
-                logger.error("Background refresh expired")
+                logger.error("[BG] task expired at \(Date(), privacy: .public) elapsed=\(Date().timeIntervalSince(startedAt), privacy: .public)s")
                 completion.finish(success: false)
             }
         }
+    }
+
+    static func recordSuccessfulRefresh() {
+        UserDefaults.standard.removeObject(forKey: retryCountKey)
     }
 
     /// Persist before updating external displays. Hooks allow boundary tests to
@@ -76,7 +123,8 @@ enum TripBackgroundRefreshService {
             }
         },
         syncWatch: ([Ticket], UUID?) async -> Bool = { tickets, selectedID in
-            await WatchSyncService.shared.queueSnapshot(tickets: tickets, selectedTicketID: selectedID)
+            await WatchSyncService.shared.queueSnapshot(tickets: tickets, selectedTicketID: selectedID,
+                                                         now: Date())
         }
     ) async -> Bool {
         guard !Task.isCancelled else { return false }
@@ -85,18 +133,30 @@ enum TripBackgroundRefreshService {
         let previousSelection = store.selectedTicketID
         let changed = store.refreshStatuses(at: now)
         let selectedID = store.selectedTicketID
-        // Keep the next journey visible at the arrival handoff, even when it
-        // is more than three hours from departure. Normal automatic refreshes
-        // remain constrained to their display window.
+        let ticketLog = store.tickets.map { ticket in
+            "id=\(ticket.id.uuidString) train=\(ticket.train) persisted=\(ticket.status.rawValue) calculated=\(ticket.status(at: now).rawValue) dep=\(String(describing: ticket.plannedDepartureAt)) arr=\(String(describing: ticket.plannedArrivalAt))"
+        }.joined(separator: " | ")
+        // Carry the selection change into ActivityKit only when the next
+        // journey entered the same automatic three-hour display window.
         let arrivedAtBoundary = previousTickets.contains { ticket in
             guard let arrival = ticket.plannedArrivalAt, ticket.status != .arrived else { return false }
             return now >= arrival
         }
-        let handoffTicketID = arrivedAtBoundary && selectedID != previousSelection ? selectedID : nil
-        logger.info("Refreshed \(store.tickets.count) tickets; statuses changed: \(changed)")
+        let handoffTicketID: UUID? = {
+            guard arrivedAtBoundary, selectedID != previousSelection,
+                  let next = store.tickets.first(where: { $0.id == selectedID }),
+                  next.isValidJourney, let start = next.startAt,
+                  let arrival = next.plannedArrivalAt, start <= now, now < arrival else {
+                return nil
+            }
+            return next.id
+        }()
+        logger.info("[BG] refresh now=\(now, privacy: .public) tickets=\(ticketLog, privacy: .public)")
+        logger.info("[BG] persisted statuses changed=\(changed) selection \(String(describing: previousSelection), privacy: .public) -> \(String(describing: selectedID), privacy: .public) handoff=\(String(describing: handoffTicketID), privacy: .public)")
         let enabled = defaults.object(forKey: "wristTrip.liveActivitiesEnabled") as? Bool ?? true
         var success = true
         do {
+            logger.info("[BG] updating ActivityKit enabled=\(enabled)")
             try await updateActivity(store.tickets, selectedID, now, enabled)
             // The injected callback keeps boundary tests independent from
             // ActivityKit. In production, publish the handoff explicitly
@@ -108,14 +168,18 @@ enum TripBackgroundRefreshService {
                                                           handoffTicketID: handoffTicketID)
             }
         } catch {
-            logger.error("Activity refresh failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("[BG] ActivityKit refresh failed: \(error.localizedDescription, privacy: .public)")
             success = false
         }
         guard !Task.isCancelled else { return false }
         // Wait until updateApplicationContext has queued the snapshot, not until
         // the watch is reachable or confirms delivery.
-        let queued = await syncWatch(store.tickets, store.selectedTicketID)
-        if !queued { logger.error("Watch snapshot could not be queued") }
+        let watchStore = TripStore(defaults: defaults)
+        let watchNow = performActivityHandoff ? Date() : now
+        _ = watchStore.refreshStatuses(at: watchNow)
+        let queued = await syncWatch(watchStore.tickets, watchStore.selectedTicketID)
+        logger.info("[BG] Watch snapshot queue result=\(queued)")
+        if !queued { logger.error("[BG] Watch snapshot could not be queued") }
         return success && queued && !Task.isCancelled
     }
 
@@ -127,23 +191,27 @@ enum TripBackgroundRefreshService {
     }
 
     static func nextBoundary(tickets: [Ticket], after now: Date, manualDeadline: Date? = nil) -> Date? {
-        let boundaries = tickets.flatMap { ticket in
-            // Keep a deterministic eight-hour fallback boundary for an
-            // activity that was started remotely before the app observed its
-            // actual ActivityKit start time. Once observed, the persisted
-            // automatic pin supplies the more precise renewal deadline below.
-            let automaticLimit = ticket.plannedDepartureAt?.addingTimeInterval(8 * 60 * 60)
-            let endOfWindow = automaticLimit.flatMap { limit in
-                ticket.plannedArrivalAt.map { limit < $0 ? limit : nil } ?? nil
+        let boundaries: [Date] = tickets.flatMap { (ticket: Ticket) -> [Date] in
+            guard ticket.isValidJourney,
+                  let start = ticket.startAt,
+                  let departure = ticket.plannedDepartureAt,
+                  let arrival = ticket.plannedArrivalAt else {
+                return []
             }
+            // A local activity normally starts at the three-hour boundary, so
+            // its first eight-hour renewal request is start + 8h. The actual
+            // pin deadline below takes precedence when iOS runs the task late
+            // and the activity starts at a different instant.
+            let automaticLimit = start.addingTimeInterval(TripScheduleRules.activityMaximumDuration)
+            let renewal: Date? = automaticLimit < arrival ? automaticLimit : nil
             return [
-                ticket.startAt,
-                ticket.plannedDepartureAt?.addingTimeInterval(-2 * 60 * 60),
-                ticket.plannedDepartureAt?.addingTimeInterval(-1 * 60 * 60),
-                ticket.plannedDepartureAt?.addingTimeInterval(-30 * 60),
-                ticket.plannedDepartureAt,
-                ticket.plannedArrivalAt,
-                endOfWindow
+                start,
+                departure.addingTimeInterval(-2 * 60 * 60),
+                departure.addingTimeInterval(-1 * 60 * 60),
+                departure.addingTimeInterval(-30 * 60),
+                departure,
+                arrival,
+                renewal
             ].compactMap { $0 }
         }
         // Manual pins and locally tracked automatic activities have their own
@@ -151,7 +219,8 @@ enum TripBackgroundRefreshService {
         // stream so a suspended app can renew the current activity and select
         // the next journey at arrival.
         let automaticDeadline = TripActivityService.nextAutomaticActivityDeadline
-        return (boundaries + [manualDeadline, automaticDeadline].compactMap { $0 })
+        let extraDeadlines: [Date] = [manualDeadline, automaticDeadline].compactMap { $0 }
+        return (boundaries + extraDeadlines)
             .filter { $0 > now }.min()
     }
 }
@@ -168,6 +237,8 @@ private final class RefreshTaskCompletion {
     func finish(success: Bool) {
         guard !finished else { return }
         finished = true
+        if success { TripBackgroundRefreshService.recordSuccessfulRefresh() }
+        TripBackgroundRefreshService.logger.info("[BG] setTaskCompleted success=\(success); scheduling retry=\(!success)")
         TripBackgroundRefreshService.schedule(retryAfterFailure: !success)
         task.setTaskCompleted(success: success)
     }

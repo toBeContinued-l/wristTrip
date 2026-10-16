@@ -42,12 +42,11 @@ private struct ActivityRouteTimeIndicator: View {
     let context: ActivityViewContext<TripActivityAttributes>
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 60)) { timeline in
-            Text(timeline.date >= context.attributes.departureAt
-                 ? context.attributes.arrivalAt
-                 : context.attributes.departureAt, style: .time)
-                .font(.caption2)
-        }
+        // Keep the compact phone presentation tied to the planned departure.
+        // The status text may change elsewhere, but this route summary does
+        // not switch to the arrival time after departure.
+        Text(context.attributes.departureAt, style: .time)
+            .font(.caption2)
     }
 }
 
@@ -119,9 +118,12 @@ private struct ActivityDepartureIndicator: View {
     }
 
     private func status(at date: Date) -> String {
-        if date < context.attributes.departureAt.addingTimeInterval(-30 * 60) { return "待出发" }
-        if date < context.attributes.departureAt { return "临近发车" }
-        return date < context.attributes.arrivalAt ? "已发车" : "已到站"
+        // When ActivityKit marks the content stale at planned arrival, keep
+        // the visible status honest until the app can perform the final end.
+        if context.isStale { return TripScheduleStatus.arrived.rawValue }
+        return TripScheduleRules.status(departure: context.attributes.departureAt,
+                                        arrival: context.attributes.arrivalAt,
+                                        now: date).rawValue
     }
 }
 
@@ -145,55 +147,57 @@ private struct PhoneActivityCard: View {
     }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "tram.fill")
-                            .foregroundStyle(accent)
-                        Text(context.attributes.train)
-                            .font(.headline.weight(.bold))
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 4)
-                    ActivityDepartureIndicator(context: context)
-                        .frame(width: 72, alignment: .trailing)
-                }
-
-                HStack(alignment: .bottom, spacing: 8) {
-                    timeColumn(routeTime(at: timeline.date), routeStation(at: timeline.date), alignment: .leading)
-                    routeMiddle
-                    timeColumn(arrivalText, context.attributes.destination, alignment: .trailing)
-                }
-
-                Divider()
-                    .overlay(primaryText.opacity(0.22))
-
-                HStack(spacing: 8) {
-                    Text(waitingGateSummary)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(primaryText)
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "tram.fill")
+                        .foregroundStyle(accent)
+                    Text(context.attributes.train)
+                        .font(.headline.weight(.bold))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.72)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    HStack(spacing: 2) {
-                        Image(systemName: "person.crop.rectangle")
-                        Text("\(display(context.attributes.seatClass)) · \(display(context.attributes.carriage)) \(display(context.attributes.seat))")
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                    }
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(accent)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
-                .font(.caption2)
+                Spacer(minLength: 4)
+                ActivityDepartureIndicator(context: context)
+                    .frame(width: 72, alignment: .trailing)
+            }
 
-                Text("以上信息仅供参考，请以车站公告为准。")
-                    .font(.caption2)
-                    .foregroundStyle(secondaryText)
+            HStack(alignment: .bottom, spacing: 8) {
+                // The iPhone activity is a ticket summary. Its planned
+                // route is fixed for the whole activity lifetime; the
+                // status label may change, but the left and right legs
+                // must remain origin/departure and destination/arrival.
+                timeColumn(departureText, context.attributes.origin, alignment: .leading)
+                routeMiddle
+                timeColumn(arrivalText, context.attributes.destination, alignment: .trailing)
+            }
+
+            Divider()
+                .overlay(primaryText.opacity(0.22))
+
+            HStack(spacing: 8) {
+                Text(waitingGateSummary)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(primaryText)
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 2) {
+                    Image(systemName: "person.crop.rectangle")
+                    Text("\(display(context.attributes.seatClass)) · \(display(context.attributes.carriage)) \(display(context.attributes.seat))")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(accent)
+                .frame(maxWidth: .infinity, alignment: .trailing)
             }
+            .font(.caption2)
+
+            Text("以上信息仅供参考，请以车站公告为准。")
+                .font(.caption2)
+                .foregroundStyle(secondaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
         }
         .foregroundStyle(primaryText)
         .padding(.horizontal, 16)
@@ -228,16 +232,6 @@ private struct PhoneActivityCard: View {
 
     private var arrivalText: String {
         formatted(context.attributes.arrivalAt, pattern: "HH:mm")
-    }
-
-    private func routeTime(at date: Date) -> String {
-        date >= context.attributes.departureAt ? arrivalText : departureText
-    }
-
-    private func routeStation(at date: Date) -> String {
-        date >= context.attributes.departureAt
-            ? context.attributes.destination
-            : context.attributes.origin
     }
 
     private var durationText: String {

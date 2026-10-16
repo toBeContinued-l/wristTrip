@@ -107,15 +107,23 @@ struct TrainTicketCard: View {
     }
 
     private func routeStation(now: Date) -> String {
-        let isAfterDeparture = departureAt.map { now >= $0 } ?? false
-        let value = isAfterDeparture && !destination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? destination : origin
+        let value: String
+        if let departureAt, let arrivalAt {
+            value = TripScheduleRules.displayedLeg(departure: departureAt, arrival: arrivalAt,
+                                                   origin: origin, destination: destination,
+                                                   now: now).station
+        } else {
+            value = origin
+        }
         return compactStation(display(value, fallback: "待补充"))
     }
 
     private func routeTime(now: Date) -> String {
-        let isAfterDeparture = departureAt.map { now >= $0 } ?? false
-        return display(isAfterDeparture && !arrivalText.isEmpty ? arrivalText : departureText, fallback: "--:--")
+        if let departureAt, let arrivalAt {
+            return display(now >= departureAt && !arrivalText.isEmpty ? arrivalText : departureText,
+                           fallback: "--:--")
+        }
+        return display(departureText, fallback: "--:--")
     }
 
     private func compactStation(_ value: String) -> String {

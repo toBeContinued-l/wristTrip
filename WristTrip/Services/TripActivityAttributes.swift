@@ -7,6 +7,11 @@ struct TripActivityAttributes: ActivityAttributes {
         // Optional so activities created before the gate field remain decodable.
         var gate: String? = nil
         var waitingRoom: String? = nil
+        /// The route leg calculated by the iPhone at the last refresh. The
+        /// iPhone widget keeps the ticket route fixed; the fields remain for
+        /// compatibility with older activity payloads and the shared model.
+        var displayedStation: String? = nil
+        var displayedTime: Date? = nil
     }
 
     let ticketID: UUID

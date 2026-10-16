@@ -632,7 +632,7 @@ final class TicketImportAndEditTests: XCTestCase {
         let longArrival = departure.addingTimeInterval(12 * 60 * 60)
         let longTicket = scheduledTicket(departure: departure, arrival: longArrival)
         XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [longTicket], after: departure),
-                       departure.addingTimeInterval(8 * 60 * 60))
+                       longTicket.startAt?.addingTimeInterval(8 * 60 * 60))
         let edited = scheduledTicket(departure: departure.addingTimeInterval(60 * 60), arrival: arrival.addingTimeInterval(60 * 60))
         XCTAssertEqual(TripBackgroundRefreshService.nextBoundary(tickets: [edited], after: departure),
                        edited.plannedDepartureAt?.addingTimeInterval(-30 * 60))
@@ -655,6 +655,63 @@ final class TicketImportAndEditTests: XCTestCase {
         let persisted = TripStore(defaults: defaults)
         XCTAssertEqual(persisted.tickets.first?.status, .arrived)
         XCTAssertNil(persisted.selectedTicketID)
+    }
+
+    @MainActor
+    func testSharedScheduleRulesCoverAllBoundariesAndDisplayedLeg() {
+        let departure = Ticket.scheduleDate(day: "2026-10-09", time: "08:00")!
+        let arrival = Ticket.scheduleDate(day: "2026-10-09", time: "12:00")!
+        XCTAssertEqual(TripScheduleRules.status(departure: departure, arrival: arrival,
+                                                 now: departure.addingTimeInterval(-3 * 60 * 60)), .upcoming)
+        XCTAssertEqual(TripScheduleRules.status(departure: departure, arrival: arrival,
+                                                 now: departure.addingTimeInterval(-2 * 60 * 60)), .upcoming)
+        XCTAssertEqual(TripScheduleRules.status(departure: departure, arrival: arrival,
+                                                 now: departure.addingTimeInterval(-30 * 60)), .boarding)
+        XCTAssertEqual(TripScheduleRules.status(departure: departure, arrival: arrival,
+                                                 now: departure), .onboard)
+        XCTAssertEqual(TripScheduleRules.status(departure: departure, arrival: arrival,
+                                                 now: arrival), .arrived)
+
+        let before = TripScheduleRules.displayedLeg(departure: departure, arrival: arrival,
+                                                     origin: "北京南", destination: "天津南",
+                                                     now: departure.addingTimeInterval(-1))
+        XCTAssertEqual(before.station, "北京南")
+        XCTAssertEqual(before.time, departure)
+        let after = TripScheduleRules.displayedLeg(departure: departure, arrival: arrival,
+                                                    origin: "北京南", destination: "天津南",
+                                                    now: departure)
+        XCTAssertEqual(after.station, "天津南")
+        XCTAssertEqual(after.time, arrival)
+    }
+
+    @MainActor
+    func testFarFutureTicketDoesNotBecomeArrivalHandoffSelection() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let store = TripStore(defaults: defaults)
+        let departure = Ticket.scheduleDate(day: "2026-10-09", time: "08:00")!
+        let arrival = Ticket.scheduleDate(day: "2026-10-09", time: "09:00")!
+        let farDeparture = departure.addingTimeInterval(10 * 60 * 60)
+        let farArrival = farDeparture.addingTimeInterval(60 * 60)
+        let first = scheduledTicket(departure: departure, arrival: arrival)
+        let next = scheduledTicket(departure: farDeparture, arrival: farArrival)
+        store.add(first)
+        store.add(next)
+        store.selectForWatch(id: first.id)
+
+        XCTAssertTrue(store.refreshStatuses(at: arrival))
+        XCTAssertNil(store.selectedTicketID)
+    }
+
+    @MainActor
+    func testNextBoundaryIsDeterministicForIdempotentScheduling() {
+        let departure = Ticket.scheduleDate(day: "2026-10-09", time: "08:00")!
+        let arrival = departure.addingTimeInterval(2 * 60 * 60)
+        let ticket = scheduledTicket(departure: departure, arrival: arrival)
+        let now = departure.addingTimeInterval(-4 * 60 * 60)
+        let first = TripBackgroundRefreshService.nextRequestDate(tickets: [ticket], after: now)
+        let second = TripBackgroundRefreshService.nextRequestDate(tickets: [ticket], after: now)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first, ticket.startAt)
     }
 
     private func scheduledTicket(departure: Date, arrival: Date) -> Ticket {

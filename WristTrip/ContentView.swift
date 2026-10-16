@@ -1,6 +1,8 @@
 import SwiftUI
+import OSLog
 
 struct ContentView: View {
+    private static let logger = Logger(subsystem: "com.clenson.WristTrip", category: "UI")
     private let onReady: () -> Void
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
@@ -102,12 +104,14 @@ struct ContentView: View {
         }
         .animation(.easeInOut, value: toast)
         .onChange(of: scenePhase) { _, phase in
+            Self.logger.info("[UI] scenePhase changed to \(String(describing: phase), privacy: .public) tickets=\(tickets.count)")
             if phase == .active {
                 checkSharedInbox()
                 tripStore.load()
                 refreshStatuses(syncWatch: true)
             } else {
                 nextRefreshAt = nil
+                activityRefreshTask?.cancel()
                 TripBackgroundRefreshService.schedule(tickets: tickets)
             }
         }
@@ -119,11 +123,12 @@ struct ContentView: View {
             guard !Task.isCancelled, scenePhase == .active else { return }
             refreshStatuses(syncWatch: true)
         }
-        .task {
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
             checkSharedInbox()
             onReady()
             while !Task.isCancelled {
-                if scenePhase == .active { refreshStatuses() }
+                refreshStatuses()
                 do {
                     try await Task.sleep(for: .seconds(60))
                 } catch {
@@ -278,8 +283,11 @@ struct ContentView: View {
     private func syncSnapshot(changedTicketID: UUID? = nil, selectedTicketID: UUID? = nil) {
         syncGeneration += 1
         let generation = syncGeneration
-        let selection = selectedTicketID ?? tripStore.selectedTicketID ?? tripStore.currentTicket(at: clock)?.id
-        WatchSyncService.shared.sync(tickets: tripStore.tickets, selectedTicketID: selection) { result in
+        // A nil selection is meaningful: the Watch app derives an active or
+        // three-hour-window ticket from the same schedule rules. Do not pin a
+        // far-future ticket during an arrival handoff.
+        let selection = selectedTicketID ?? tripStore.selectedTicketID
+        WatchSyncService.shared.sync(tickets: tripStore.tickets, selectedTicketID: selection, now: Date()) { result in
             guard generation == syncGeneration else { return }
             switch result {
             case .success(let receipt):
@@ -321,16 +329,19 @@ struct ContentView: View {
     private func refreshActivity(requestedTicketID: UUID? = nil, reportToUser: Bool = false,
                                  handoffTicketID: UUID? = nil) {
         clock = Date()
+        Self.logger.info("[UI] refreshActivity now=\(clock, privacy: .public) requested=\(String(describing: requestedTicketID), privacy: .public) handoff=\(String(describing: handoffTicketID), privacy: .public) selected=\(String(describing: tripStore.selectedTicketID), privacy: .public) tickets=\(tripStore.tickets.count)")
         scheduleStateRefresh()
         activityGeneration += 1
         let generation = activityGeneration
-        let previous = activityRefreshTask
         let snapshot = tripStore.tickets
         let selectedID = tripStore.selectedTicketID ?? tripStore.currentTicket(at: clock)?.id
         pushService.updateSchedule(tickets: snapshot, selectedTicketID: selectedID,
                                    enabled: liveActivitiesEnabled && remoteScheduleEnabled)
+        // Only the newest reconciliation is useful. Cancelling the previous
+        // task prevents a burst of scene/status callbacks from building a
+        // serial backlog while the app is under memory pressure.
+        activityRefreshTask?.cancel()
         activityRefreshTask = Task { @MainActor in
-            _ = await previous?.value
             guard generation == activityGeneration else { return }
             guard liveActivitiesEnabled else {
                 await TripActivityService.endAll()
@@ -345,6 +356,7 @@ struct ContentView: View {
                                                                     selectedTicketID: selectedID,
                                                                     requestedTicketID: requestedTicketID,
                                                                     handoffTicketID: handoffTicketID)
+                Self.logger.info("[UI] ActivityKit result=\(String(describing: result), privacy: .public)")
                 guard generation == activityGeneration else { return }
                 switch result {
                 case .started(let id), .updated(let id):
@@ -368,6 +380,7 @@ struct ContentView: View {
                 scheduleStateRefresh()
                 if reportToUser { toast = activityFeedback }
             } catch {
+                Self.logger.error("[UI] ActivityKit refresh failed: \(error.localizedDescription, privacy: .public)")
                 guard generation == activityGeneration else { return }
                 activityFeedback = "实时活动启动失败：\(error.localizedDescription)"
                 if reportToUser { toast = activityFeedback }
@@ -420,11 +433,16 @@ struct ContentView: View {
         }
         clock = Date()
         let changed = tripStore.refreshStatuses(at: clock)
+        let statusLog = tripStore.tickets.map { "\($0.id.uuidString):\($0.status.rawValue)" }.joined(separator: ",")
+        Self.logger.info("[UI] refreshStatuses now=\(clock, privacy: .public) changed=\(changed) syncWatch=\(syncWatch) selection \(String(describing: previousSelection), privacy: .public) -> \(String(describing: tripStore.selectedTicketID), privacy: .public) statuses=\(statusLog, privacy: .public)")
         if changed || syncWatch { syncSnapshot(changedTicketID: changedTicketID) }
         let handoffTicketID: UUID?
         if let previousSelection,
            previousSelectedTicket?.plannedArrivalAt.map({ clock >= $0 }) == true,
-           tripStore.selectedTicketID != previousSelection {
+           tripStore.selectedTicketID != previousSelection,
+           let next = tripStore.selectedTicketID.flatMap({ id in tripStore.tickets.first { $0.id == id } }),
+           next.isValidJourney, let start = next.startAt,
+           let arrival = next.plannedArrivalAt, start <= clock, clock < arrival {
             handoffTicketID = tripStore.selectedTicketID
         } else {
             handoffTicketID = nil

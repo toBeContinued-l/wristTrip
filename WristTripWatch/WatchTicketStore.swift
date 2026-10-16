@@ -1,8 +1,10 @@
 import Foundation
 import Combine
+import OSLog
 import WatchConnectivity
 
 final class WatchTicketStore: NSObject, ObservableObject, WCSessionDelegate {
+    private let logger = Logger(subsystem: "com.clenson.WristTrip", category: "WatchConnectivity")
     @Published private(set) var snapshot: WatchTicketSnapshot?
     @Published private(set) var syncError: String?
 
@@ -17,10 +19,12 @@ final class WatchTicketStore: NSObject, ObservableObject, WCSessionDelegate {
            let cached = try? JSONDecoder().decode(WatchTicketSnapshot.self, from: data),
            cached.schemaVersion == WatchTicketSnapshot.schemaVersion {
             snapshot = cached
+            logger.info("[WATCH] loaded offline snapshot id=\(cached.id.uuidString, privacy: .public) generatedAt=\(cached.generatedAt, privacy: .public) tickets=\(cached.tickets.count) selected=\(String(describing: cached.selectedTicketID), privacy: .public)")
         }
         if WCSession.isSupported() {
             WCSession.default.delegate = self
             WCSession.default.activate()
+            logger.info("[WATCH] session activation requested")
             if let data = WCSession.default.receivedApplicationContext["snapshot"] as? Data {
                 receive(data)
             }
@@ -40,10 +44,14 @@ final class WatchTicketStore: NSObject, ObservableObject, WCSessionDelegate {
         if let active = tickets.first(where: { $0.departureAt <= now && now < ($0.arrivalAt ?? .distantFuture) }) {
             return active
         }
-        return tickets.first(where: { $0.departureAt > now })
+        return tickets.first(where: {
+            let start = $0.departureAt.addingTimeInterval(-TripScheduleRules.automaticDisplayLeadTime)
+            return start <= now && now < ($0.arrivalAt ?? .distantFuture)
+        })
     }
 
     func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
+        logger.info("[WATCH] activation completed state=\(activationState.rawValue) reachable=\(session.isReachable) error=\(String(describing: error), privacy: .public)")
         if let error {
             DispatchQueue.main.async { self.syncError = error.localizedDescription }
         }
@@ -66,6 +74,7 @@ final class WatchTicketStore: NSObject, ObservableObject, WCSessionDelegate {
     private func receive(_ messageData: Data) -> Data? {
         guard let incoming = try? JSONDecoder().decode(WatchTicketSnapshot.self, from: messageData),
               incoming.schemaVersion == WatchTicketSnapshot.schemaVersion else {
+            logger.error("[WATCH] received invalid snapshot payload bytes=\(messageData.count)")
             return nil
         }
 
@@ -74,15 +83,22 @@ final class WatchTicketStore: NSObject, ObservableObject, WCSessionDelegate {
 
         do {
             let current = (try? Data(contentsOf: fileURL)).flatMap { try? JSONDecoder().decode(WatchTicketSnapshot.self, from: $0) }
-            if let current, current.generatedAt > incoming.generatedAt {
+            // updateApplicationContext is latest-value delivery. Ignore equal
+            // or older snapshots so a delayed callback cannot roll the Watch
+            // back to an earlier selection or status.
+            if let current, current.generatedAt >= incoming.generatedAt {
+                logger.info("[WATCH] ignored stale snapshot incoming=\(incoming.id.uuidString, privacy: .public) incomingAt=\(incoming.generatedAt, privacy: .public) currentAt=\(current.generatedAt, privacy: .public)")
                 return nil
             } else {
                 try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try messageData.write(to: fileURL, options: .atomic)
                 DispatchQueue.main.async {
-                    self.snapshot = incoming
-                    self.syncError = nil
+                    if self.snapshot?.generatedAt ?? .distantPast < incoming.generatedAt {
+                        self.snapshot = incoming
+                        self.syncError = nil
+                    }
                 }
+                logger.info("[WATCH] applied snapshot id=\(incoming.id.uuidString, privacy: .public) generatedAt=\(incoming.generatedAt, privacy: .public) tickets=\(incoming.tickets.count) selected=\(String(describing: incoming.selectedTicketID), privacy: .public)")
             }
             let acknowledgement = WatchSyncAcknowledgement(
                 schemaVersion: WatchTicketSnapshot.schemaVersion,
@@ -90,6 +106,7 @@ final class WatchTicketStore: NSObject, ObservableObject, WCSessionDelegate {
             )
             return try JSONEncoder().encode(acknowledgement)
         } catch {
+            logger.error("[WATCH] persist snapshot failed: \(error.localizedDescription, privacy: .public)")
             DispatchQueue.main.async { self.syncError = error.localizedDescription }
             return nil
         }

@@ -51,7 +51,7 @@ final class ActivityPushTokenService: ObservableObject {
         let waitingRoom: String
 
         init?(_ ticket: Ticket, now: Date) {
-            guard !ticket.isDraft, let departure = ticket.plannedDepartureAt,
+            guard ticket.isValidJourney, let departure = ticket.plannedDepartureAt,
                   let arrival = ticket.plannedArrivalAt, arrival > now else { return nil }
             id = ticket.id
             train = ticket.train
@@ -59,7 +59,7 @@ final class ActivityPushTokenService: ObservableObject {
             destination = ticket.to
             departureAt = departure
             arrivalAt = arrival
-            startAt = departure.addingTimeInterval(-3 * 60 * 60)
+            startAt = TripScheduleRules.automaticStart(departure: departure)
             timezoneIdentifier = ticket.originalTimezoneIdentifier
             carriage = ticket.carriage
             seat = ticket.seat
@@ -88,6 +88,10 @@ final class ActivityPushTokenService: ObservableObject {
     private var pushToStartTask: Task<Void, Never>?
     private var activityUpdateTask: Task<Void, Never>?
     private var activityTasks: [String: Task<Void, Never>] = [:]
+    private var activityStateTasks: [String: Task<Void, Never>] = [:]
+    private var activityArrivalTasks: [String: Task<Void, Never>] = [:]
+    private var handledStaleActivityIDs = Set<String>()
+    private var programmaticallyEndingActivityIDs = Set<String>()
     private var deliveryTask: Task<Void, Never>?
     private var tickets: [Ticket] = []
     private var selectedTicketID: UUID?
@@ -108,19 +112,20 @@ final class ActivityPushTokenService: ObservableObject {
         for activity in activities {
             observe(activity: activity, ticketID: activity.attributes.ticketID)
         }
-        activityUpdateTask = Task { [weak self] in
+        activityUpdateTask = Task { @MainActor [weak self] in
             for await activity in Activity<TripActivityAttributes>.activityUpdates {
-                guard let self else { continue }
+                guard !Task.isCancelled, let self else { return }
                 self.observe(activity: activity, ticketID: activity.attributes.ticketID)
             }
         }
-        pushToStartTask = Task { [weak self] in
-            guard let self else { return }
+        pushToStartTask = Task { @MainActor [weak self] in
             if let token = Activity<TripActivityAttributes>.pushToStartToken {
+                guard let self else { return }
                 self.store(Registration(kind: .pushToStart, token: Self.hexToken(token),
                                         activityID: nil, ticketID: nil, createdAt: Date()))
             }
             for await token in Activity<TripActivityAttributes>.pushToStartTokenUpdates {
+                guard !Task.isCancelled, let self else { return }
                 self.store(Registration(kind: .pushToStart, token: Self.hexToken(token),
                                         activityID: nil, ticketID: nil, createdAt: Date()))
             }
@@ -130,25 +135,105 @@ final class ActivityPushTokenService: ObservableObject {
     func observe(activity: Activity<TripActivityAttributes>, ticketID: UUID) {
         let activityID = activity.id
         guard activityTasks[activityID] == nil else { return }
-        activityTasks[activityID] = Task { [weak self] in
-            guard let self else { return }
+        handledStaleActivityIDs.remove(activityID)
+        activityTasks[activityID] = Task { @MainActor [weak self] in
             if let token = activity.pushToken {
+                guard let self else { return }
                 self.store(Registration(kind: .activity, token: Self.hexToken(token),
                                         activityID: activityID, ticketID: ticketID, createdAt: Date()))
             }
             for await token in activity.pushTokenUpdates {
+                guard !Task.isCancelled, let self else { return }
                 self.store(Registration(kind: .activity, token: Self.hexToken(token),
                                         activityID: activityID, ticketID: ticketID, createdAt: Date()))
+            }
+        }
+        activityStateTasks[activityID] = Task { @MainActor [weak self] in
+            for await state in activity.activityStateUpdates {
+                guard !Task.isCancelled, let self else { return }
+                switch state {
+                case .stale:
+                    // If ActivityKit delivers staleDate while the process is
+                    // resumed, reconcile immediately even when no BG task ran
+                    // at the planned boundary so an arrived activity can end.
+                    guard self.handledStaleActivityIDs.insert(activityID).inserted else {
+                        continue
+                    }
+                    self.logger.info("[ACTIVITY] state became stale id=\(activityID, privacy: .public)")
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        let success = await TripBackgroundRefreshService.refresh(now: Date(),
+                                                                                  performActivityHandoff: true)
+                        if !success {
+                            TripBackgroundRefreshService.schedule(retryAfterFailure: true)
+                        } else {
+                            TripBackgroundRefreshService.recordSuccessfulRefresh()
+                            // The refresh can clear an arrived ticket's
+                            // renewal pin. Reconcile again after ActivityKit
+                            // finishes so an obsolete eight-hour request is
+                            // not left in BGTaskScheduler.
+                            TripBackgroundRefreshService.schedule()
+                        }
+                    }
+                    return
+                case .ended, .dismissed:
+                    // A swipe-to-dismiss is a user-visible activity state
+                    // change. Reconcile the next BG boundary without making
+                    // Watch reachability a prerequisite for iPhone activity.
+                    if state == .dismissed && !self.programmaticallyEndingActivityIDs.contains(activityID) {
+                        TripActivityService.recordDismissal(ticketID: ticketID)
+                    }
+                    self.stopObserving(activityID: activityID)
+                    self.handledStaleActivityIDs.remove(activityID)
+                    TripBackgroundRefreshService.schedule()
+                    return
+                default:
+                    continue
+                }
+            }
+        }
+        // staleDate is a display hint and does not guarantee that the app is
+        // resumed at the arrival instant. While the process is running, keep
+        // an explicit arrival timer so the normal refresh path ends the
+        // activity instead of leaving a stale card visible indefinitely.
+        activityArrivalTasks[activityID] = Task { @MainActor [weak self] in
+            do {
+                let delay = activity.attributes.arrivalAt.timeIntervalSinceNow
+                if delay > 0 {
+                    try await Task.sleep(for: .seconds(delay))
+                }
+                guard !Task.isCancelled, let self,
+                      Activity<TripActivityAttributes>.activities.contains(where: { $0.id == activityID }) else { return }
+                self.logger.info("[ACTIVITY] arrival cleanup timer fired id=\(activityID, privacy: .public)")
+                let success = await TripBackgroundRefreshService.refresh(now: Date(),
+                                                                          performActivityHandoff: true)
+                if success {
+                    TripBackgroundRefreshService.recordSuccessfulRefresh()
+                    TripBackgroundRefreshService.schedule()
+                } else {
+                    TripBackgroundRefreshService.schedule(retryAfterFailure: true)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.logger.error("[ACTIVITY] arrival cleanup timer failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
 
     func stopObserving(activityID: String) {
         activityTasks.removeValue(forKey: activityID)?.cancel()
+        activityStateTasks.removeValue(forKey: activityID)?.cancel()
+        activityArrivalTasks.removeValue(forKey: activityID)?.cancel()
+        handledStaleActivityIDs.remove(activityID)
         var values = registrations()
         values.removeAll { $0.kind == .activity && $0.activityID == activityID }
         saveRegistrations(values)
         reconcile()
+    }
+
+    func markProgrammaticEnd(activityID: String) {
+        programmaticallyEndingActivityIDs.insert(activityID)
     }
 
     func updateSchedule(tickets: [Ticket], selectedTicketID: UUID?, enabled: Bool) {
