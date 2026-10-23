@@ -1,0 +1,15 @@
+.DS_Store
+*.md
+!/README.md
+DerivedData/
+build/
+docs/
+ExportOptions.plist
+UploadOptions.plist
+WristTrip/Resources/logo-source.png
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+.swiftpm/
+Pods/
+*.dSYM
