@@ -38,7 +38,7 @@ private struct PrivacyPolicyView: UIViewControllerRepresentable {
 
 struct SettingsView: View {
     private let feedbackEmail = "1056860980@qq.com"
-    private let privacyPolicyURL = URL(string: "https://www.clenson.com/wristTrip-privacy.html")!
+    private let privacyPolicyURL = URL(string: "https://clenson.com/wristTrip-privacy.html")!
 
     @Binding var showingWatch: Bool
     @Binding var toast: String?
@@ -100,6 +100,8 @@ struct SettingsView: View {
                         toast = "邮箱已复制"
                     } label: {
                         Image(systemName: "doc.on.doc")
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("复制邮箱")

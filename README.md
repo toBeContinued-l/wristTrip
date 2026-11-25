@@ -24,4 +24,6 @@ WristTrip 是一款 iPhone 与 Apple Watch 车票管理应用。它可以从车�
 - `WristTripShare/`：系统分享扩展。
 - `WristTripTests/`：自动化测试。
 
+启动页实现与后续复用说明见 [`IOS_LAUNCH_SCREEN.txt`](IOS_LAUNCH_SCREEN.txt)。
+
 本项目不是中国铁路 12306 官方应用。行程信息以车票中的计划时间为准，不能代替官方的晚点、检票或站台通知。

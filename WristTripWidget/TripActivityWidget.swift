@@ -42,11 +42,19 @@ struct TripActivityWidget: Widget {
 private struct ActivityRouteTimeIndicator: View {
     let context: ActivityViewContext<TripActivityAttributes>
 
+    private var departureText: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: context.attributes.departureAt)
+    }
+
     var body: some View {
         // Keep the compact phone presentation tied to the planned departure.
         // The status text may change elsewhere, but this route summary does
         // not switch to the arrival time after departure.
-        Text(context.attributes.departureAt, style: .time)
+        Text(departureText)
             .font(.caption2)
     }
 }

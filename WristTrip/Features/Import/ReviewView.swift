@@ -79,11 +79,11 @@ struct ReviewView: View {
                         .controlSize(.large)
                         .disabled(isRecognizing)
                         Button("保存为草稿") { save(draft: true) }
-                            .frame(maxWidth: .infinity)
+                            .frame(maxWidth: .infinity, minHeight: 44)
                             .disabled(isRecognizing)
                     }
                 }
-                .padding(20)
+                .padding(16)
             }
             .background(TripPalette.page(for: colorScheme).ignoresSafeArea())
             .navigationTitle("截图识别")

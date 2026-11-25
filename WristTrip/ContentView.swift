@@ -240,7 +240,7 @@ struct ContentView: View {
                     Label("信息来自导入截图与手动修改，不代表铁路实时状态", systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.secondary).padding(.top, 4)
                 }
-                .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 24)
+                .padding(.horizontal, 16).padding(.top, 12).padding(.bottom, 24)
             }
         }
         .background(TripPalette.page(for: colorScheme).ignoresSafeArea())
@@ -267,6 +267,7 @@ struct ContentView: View {
 
     private func sectionHeader(_ title: String, action: String?, actionHandler: (() -> Void)? = nil) -> some View {
         HStack { Text(title).font(.title3.weight(.bold)); Spacer(); if let action, let actionHandler { Button(action, action: actionHandler).font(.subheadline.weight(.medium)) } }
+            .frame(minHeight: 44)
     }
 
     private func syncCurrent() {

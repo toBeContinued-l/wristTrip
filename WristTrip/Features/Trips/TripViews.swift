@@ -543,6 +543,7 @@ struct TicketEditorView: View {
                            _ field: TicketEditField, font: Font = .subheadline.weight(.medium)) -> some View {
         TextField(prompt, text: text)
             .font(font)
+            .frame(minHeight: 44)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
             .focused($focusedField, equals: field)
@@ -586,7 +587,7 @@ struct TicketEditorView: View {
                     .stroke(scheduleValidationBorderColor(value.wrappedValue, kind: kind, required: required), lineWidth: 1)
                     .allowsHitTesting(false)
             }
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, minHeight: 44)
             .accessibilityLabel(field == .travelDate || field == .arrivalDate ? "日期" : "时间")
             .accessibilityHint(scheduleValidationHint(value.wrappedValue, kind: kind, required: required))
     }
@@ -649,6 +650,7 @@ struct TicketEditorView: View {
                     .keyboardType(.decimalPad)
                     .multilineTextAlignment(.trailing)
                     .monospacedDigit()
+                    .frame(minHeight: 44)
                     .focused($focusedField, equals: .fare)
             }
         }

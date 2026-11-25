@@ -100,6 +100,11 @@ final class TicketImportAndEditTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(object["createdAt"] as? Double), 123.25, accuracy: 0.0001)
     }
 
+    func testClientLogTimestampUsesBeijingTime() throws {
+        let instant = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-11-25T00:00:00Z"))
+        XCTAssertEqual(ClientLogTimestamp.format(instant), "2026-11-25T08:00:00.000+0800")
+    }
+
     func testScheduleResponseRequiresBusinessSuccessCode() throws {
         let success = try JSONDecoder().decode(ActivityPushTokenService.ScheduleResponse.self,
                                                 from: Data(#"{"code":0,"data":12,"err":""}"#.utf8))
